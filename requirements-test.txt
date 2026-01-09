@@ -1,0 +1,21 @@
+# Test dependencies for Donetick Home Assistant Integration
+
+# Home Assistant core (needed for testing integration)
+homeassistant>=2024.1.0
+
+# Testing framework
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+
+# Mocking
+aiohttp>=3.8.0
+
+# Schema validation
+voluptuous>=0.13.0
+
+# Timezone support
+tzdata>=2023.0
+
+# Type stubs (optional, for IDE support)
+types-python-dateutil>=2.8.0

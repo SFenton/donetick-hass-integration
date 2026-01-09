@@ -27,7 +27,7 @@ complete_task:
 
 create_task:
   name: Create Task
-  description: Create a new Donetick task
+  description: Create a new Donetick task. With username/password auth, supports priority, frequency, assignees, and more.
   fields:
     name:
       name: Task Name
@@ -56,6 +56,85 @@ create_task:
         number:
           min: 1
           mode: box
+    priority:
+      name: Priority
+      description: Task priority 0-3 (0=None, 1=Low, 2=Medium, 3=High) - Requires username/password auth
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 3
+          mode: slider
+    frequency_type:
+      name: Frequency Type
+      description: Repeat frequency (once, daily, weekly, monthly, yearly, etc.) - Requires username/password auth
+      required: false
+      selector:
+        select:
+          options:
+            - "once"
+            - "daily"
+            - "weekly"
+            - "monthly"
+            - "yearly"
+            - "interval"
+            - "days_of_the_week"
+            - "day_of_the_month"
+            - "no_repeat"
+    frequency:
+      name: Frequency Value
+      description: Frequency interval (e.g., every 2 days) - Requires username/password auth
+      required: false
+      selector:
+        number:
+          min: 1
+          mode: box
+    assignees:
+      name: Assignee User IDs
+      description: Comma-separated list of user IDs to assign - Requires username/password auth
+      required: false
+      selector:
+        text:
+    assign_strategy:
+      name: Assignment Strategy
+      description: How to rotate assignees - Requires username/password auth
+      required: false
+      selector:
+        select:
+          options:
+            - "random"
+            - "least_assigned"
+            - "least_completed"
+            - "keep_last_assigned"
+            - "random_except_last_assigned"
+            - "round_robin"
+            - "no_assignee"
+    points:
+      name: Points
+      description: Points awarded for completing this task - Requires username/password auth
+      required: false
+      selector:
+        number:
+          min: 0
+          mode: box
+    notification:
+      name: Enable Notifications
+      description: Enable notifications for this task - Requires username/password auth
+      required: false
+      selector:
+        boolean:
+    require_approval:
+      name: Require Approval
+      description: Require admin approval for task completion - Requires username/password auth
+      required: false
+      selector:
+        boolean:
+    is_private:
+      name: Private Task
+      description: Make task private (only visible to creator and assignees) - Requires username/password auth
+      required: false
+      selector:
+        boolean:
     config_entry_id:
       name: Config Entry ID
       description: The specific Donetick integration to use (optional, uses first if not specified)
@@ -65,7 +144,7 @@ create_task:
 
 update_task:
   name: Update Task
-  description: Update an existing Donetick task
+  description: Update an existing Donetick task. With username/password auth, supports priority, frequency, assignees, and more.
   fields:
     task_id:
       name: Task ID
@@ -94,6 +173,85 @@ update_task:
       required: false
       selector:
         text:
+    priority:
+      name: Priority
+      description: Task priority 0-3 (0=None, 1=Low, 2=Medium, 3=High) - Requires username/password auth
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 3
+          mode: slider
+    frequency_type:
+      name: Frequency Type
+      description: Repeat frequency (once, daily, weekly, monthly, yearly, etc.) - Requires username/password auth
+      required: false
+      selector:
+        select:
+          options:
+            - "once"
+            - "daily"
+            - "weekly"
+            - "monthly"
+            - "yearly"
+            - "interval"
+            - "days_of_the_week"
+            - "day_of_the_month"
+            - "no_repeat"
+    frequency:
+      name: Frequency Value
+      description: Frequency interval (e.g., every 2 days) - Requires username/password auth
+      required: false
+      selector:
+        number:
+          min: 1
+          mode: box
+    assignees:
+      name: Assignee User IDs
+      description: Comma-separated list of user IDs to assign - Requires username/password auth
+      required: false
+      selector:
+        text:
+    assign_strategy:
+      name: Assignment Strategy
+      description: How to rotate assignees - Requires username/password auth
+      required: false
+      selector:
+        select:
+          options:
+            - "random"
+            - "least_assigned"
+            - "least_completed"
+            - "keep_last_assigned"
+            - "random_except_last_assigned"
+            - "round_robin"
+            - "no_assignee"
+    points:
+      name: Points
+      description: Points awarded for completing this task - Requires username/password auth
+      required: false
+      selector:
+        number:
+          min: 0
+          mode: box
+    notification:
+      name: Enable Notifications
+      description: Enable notifications for this task - Requires username/password auth
+      required: false
+      selector:
+        boolean:
+    require_approval:
+      name: Require Approval
+      description: Require admin approval for task completion - Requires username/password auth
+      required: false
+      selector:
+        boolean:
+    is_private:
+      name: Private Task
+      description: Make task private (only visible to creator and assignees) - Requires username/password auth
+      required: false
+      selector:
+        boolean:
     config_entry_id:
       name: Config Entry ID
       description: The specific Donetick integration to use (optional, uses first if not specified)
@@ -119,3 +277,143 @@ delete_task:
       required: false
       selector:
         text:
+
+create_task_form:
+  name: Create Task (Form)
+  description: Create a new Donetick task with a user-friendly form interface. Requires username/password authentication.
+  fields:
+    name:
+      name: Task Name
+      description: What needs to be done?
+      required: true
+      example: "Take out the trash"
+      selector:
+        text:
+    description:
+      name: Description
+      description: Additional details about the task (optional)
+      required: false
+      selector:
+        text:
+          multiline: true
+    due_date:
+      name: Due Date
+      description: When is this task due? (optional)
+      required: false
+      selector:
+        datetime:
+    priority:
+      name: Priority
+      description: How important is this task?
+      required: false
+      default: "none"
+      selector:
+        select:
+          mode: dropdown
+          options:
+            - label: "No Priority"
+              value: "none"
+            - label: "🔵 Low"
+              value: "low"
+            - label: "🟡 Medium"
+              value: "medium"
+            - label: "🔴 High"
+              value: "high"
+    recurrence:
+      name: Recurrence
+      description: How often should this task repeat?
+      required: false
+      default: "no_repeat"
+      selector:
+        select:
+          mode: dropdown
+          options:
+            - label: "No Recurrence (One-time)"
+              value: "no_repeat"
+            - label: "Daily"
+              value: "daily"
+            - label: "Weekly"
+              value: "weekly"
+            - label: "Monthly"
+              value: "monthly"
+            - label: "Yearly"
+              value: "yearly"
+            - label: "Custom Interval"
+              value: "interval"
+    recurrence_interval:
+      name: Repeat Every (days)
+      description: For custom interval - repeat every N days
+      required: false
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 365
+          mode: box
+          unit_of_measurement: "days"
+    assignees:
+      name: Assign To
+      description: Select one or more assignees (leave empty for unassigned). Enter comma-separated user IDs, or leave blank to fetch from your circle.
+      required: false
+      selector:
+        text:
+          multiline: false
+    assign_strategy:
+      name: Assignment Strategy
+      description: How should tasks rotate between assignees?
+      required: false
+      default: "random"
+      selector:
+        select:
+          mode: dropdown
+          options:
+            - label: "Random"
+              value: "random"
+            - label: "Round Robin"
+              value: "round_robin"
+            - label: "Least Assigned"
+              value: "least_assigned"
+            - label: "Least Completed"
+              value: "least_completed"
+            - label: "Keep Last Assigned"
+              value: "keep_last_assigned"
+            - label: "Random (Except Last)"
+              value: "random_except_last_assigned"
+    points:
+      name: Points
+      description: Points awarded for completing this task
+      required: false
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 1000
+          mode: box
+    notification:
+      name: Enable Notifications
+      description: Send notifications for this task?
+      required: false
+      default: true
+      selector:
+        boolean:
+    require_approval:
+      name: Require Approval
+      description: Require admin approval when task is marked complete?
+      required: false
+      default: false
+      selector:
+        boolean:
+    is_private:
+      name: Private Task
+      description: Only visible to creator and assignees?
+      required: false
+      default: false
+      selector:
+        boolean:
+    config_entry_id:
+      name: Config Entry ID
+      description: The specific Donetick integration to use (optional, uses first if not specified)
+      required: false
+      selector:
+        config_entry:
+          integration: donetick

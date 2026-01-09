@@ -13,10 +13,43 @@ from homeassistant.components.text import TextEntity
 from homeassistant.const import STATE_ON, STATE_OFF
 
 from .api import DonetickApiClient
-from .const import DOMAIN, CONF_URL, CONF_TOKEN
+from .const import (
+    DOMAIN,
+    CONF_URL,
+    CONF_TOKEN,
+    CONF_USERNAME,
+    CONF_PASSWORD,
+    CONF_AUTH_TYPE,
+    AUTH_TYPE_JWT,
+    AUTH_TYPE_API_KEY,
+)
 from .model import DonetickThing
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _create_api_client(hass: HomeAssistant, config_entry: ConfigEntry) -> DonetickApiClient:
+    """Create an API client for the config entry."""
+    session = async_get_clientsession(hass)
+    entry_data = hass.data[DOMAIN][config_entry.entry_id]
+    auth_type = entry_data.get(CONF_AUTH_TYPE, AUTH_TYPE_API_KEY)
+    
+    if auth_type == AUTH_TYPE_JWT:
+        return DonetickApiClient(
+            entry_data[CONF_URL],
+            session,
+            username=entry_data.get(CONF_USERNAME),
+            password=entry_data.get(CONF_PASSWORD),
+            auth_type=AUTH_TYPE_JWT,
+        )
+    else:
+        return DonetickApiClient(
+            entry_data[CONF_URL],
+            session,
+            api_token=entry_data.get(CONF_TOKEN),
+            auth_type=AUTH_TYPE_API_KEY,
+        )
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -25,13 +58,7 @@ async def async_setup_entry(
     platform: str = None,
 ) -> None:
     """Set up Donetick thing entities for specific platform."""
-    config = hass.data[DOMAIN][config_entry.entry_id]
-    session = async_get_clientsession(hass)
-    client = DonetickApiClient(
-        config[CONF_URL],
-        config[CONF_TOKEN], 
-        session
-    )
+    client = _create_api_client(hass, config_entry)
     
     try:
         things = await client.async_get_things()
