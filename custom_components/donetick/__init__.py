@@ -490,10 +490,12 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
     
     # Parse assignees from comma-separated string to list of ints
     assignees_str = call.data.get("assignees")
+    _LOGGER.debug("Assignees received: %r (type: %s)", assignees_str, type(assignees_str).__name__)
     assignees = None
     if assignees_str:
         try:
             assignees = [int(x.strip()) for x in assignees_str.split(",") if x.strip()]
+            _LOGGER.debug("Parsed assignees: %r", assignees)
         except ValueError:
             _LOGGER.error("Invalid assignees format. Expected comma-separated user IDs.")
             return
