@@ -444,16 +444,23 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
     # Process due_date - handle datetime from UI selector
     due_date = None
     if due_date_raw:
+        _LOGGER.debug("Raw due_date received: %r (type: %s)", due_date_raw, type(due_date_raw).__name__)
         if isinstance(due_date_raw, str):
-            due_date = due_date_raw
+            # Strip whitespace that may come from Jinja templates
+            due_date = due_date_raw.strip()
+            # If it's just a date or datetime without timezone, add Z suffix
+            if due_date and 'T' in due_date and not (due_date.endswith('Z') or '+' in due_date or due_date.count(':') >= 2 and '-' in due_date[-6:]):
+                due_date = due_date + "Z"
+            _LOGGER.debug("Processed due_date string: %r", due_date)
         else:
             # Convert datetime object to RFC3339 format
             try:
                 from datetime import datetime
                 if hasattr(due_date_raw, 'isoformat'):
-                    due_date = due_date_raw.isoformat()
+                    due_date = due_date_raw.isoformat() + "Z"
                 else:
                     due_date = str(due_date_raw)
+                _LOGGER.debug("Converted due_date from object: %r", due_date)
             except Exception as e:
                 _LOGGER.warning("Could not parse due date: %s", e)
     
@@ -464,6 +471,11 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
     
     # Get API client
     client = _get_api_client(hass, entry.entry_id)
+    
+    _LOGGER.debug(
+        "Creating task via form - name: %r, due_date: %r, priority: %r, frequency_type: %r",
+        name, due_date, priority, frequency_type
+    )
     
     try:
         result = await client.async_create_task(

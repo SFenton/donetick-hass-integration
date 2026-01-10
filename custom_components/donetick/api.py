@@ -220,6 +220,22 @@ class DonetickApiClient:
                     await self._ensure_authenticated()
                     return await self._request(method, endpoint, json_data, params, retry_on_401=False)
                 
+                # Log detailed error info for 4xx errors before raising
+                if 400 <= response.status < 500:
+                    try:
+                        error_body = await response.text()
+                        _LOGGER.error(
+                            "API request failed: %s %s - Status %s, Response: %s",
+                            method, endpoint, response.status, error_body
+                        )
+                    except Exception:
+                        _LOGGER.error(
+                            "API request failed: %s %s - Status %s",
+                            method, endpoint, response.status
+                        )
+                    if json_data:
+                        _LOGGER.error("Request payload was: %s", json.dumps(json_data, default=str))
+                
                 response.raise_for_status()
                 
                 # Handle empty responses
@@ -228,8 +244,13 @@ class DonetickApiClient:
                 
                 return await response.json()
                 
+        except aiohttp.ClientResponseError as err:
+            # Already logged above for 4xx, just re-raise
+            raise
         except aiohttp.ClientError as err:
             _LOGGER.error("API request failed: %s %s - %s", method, endpoint, err)
+            if json_data:
+                _LOGGER.debug("Request payload: %s", json.dumps(json_data, default=str))
             raise
 
     # ==================== Task/Chore Methods ====================
