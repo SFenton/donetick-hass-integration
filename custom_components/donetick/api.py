@@ -689,7 +689,11 @@ class DonetickApiClient:
         
         endpoint = f"/api/v1/chores/{chore_id}/dueDate"
         try:
-            await self._request("PUT", endpoint, json_data={"dueDate": due_date})
+            # Server requires both dueDate and updatedAt fields
+            await self._request("PUT", endpoint, json_data={
+                "dueDate": due_date,
+                "updatedAt": datetime.now(timezone.utc).isoformat(),
+            })
             return True
         except Exception as err:
             _LOGGER.error("Error updating due date: %s", err)
