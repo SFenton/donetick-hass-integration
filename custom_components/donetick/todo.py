@@ -587,7 +587,7 @@ async def async_setup_entry(
         
         # Create global (unassigned) date-filtered lists
         _LOGGER.debug("Creating global date-filtered lists for unassigned tasks")
-        for list_type in ["past_due", "due_today", "upcoming"]:
+        for list_type in ["past_due", "due_today", "upcoming", "no_due_date"]:
             entity = DonetickDateFilteredTasksList(coordinator, config_entry, hass, list_type, member=None)
             entity._circle_members = circle_members
             entities.append(entity)
@@ -596,7 +596,7 @@ async def async_setup_entry(
         for member in circle_members:
             if member.is_active:
                 _LOGGER.debug("Creating date-filtered lists for member: %s (ID: %d)", member.display_name, member.user_id)
-                for list_type in ["past_due", "due_today", "upcoming"]:
+                for list_type in ["past_due", "due_today", "upcoming", "no_due_date"]:
                     entity = DonetickDateFilteredTasksList(coordinator, config_entry, hass, list_type, member=member)
                     entity._circle_members = circle_members
                     entities.append(entity)
@@ -604,7 +604,7 @@ async def async_setup_entry(
                 # If include_unassigned is enabled, also create "With Unassigned" lists
                 if include_unassigned:
                     _LOGGER.debug("Creating 'With Unassigned' lists for member: %s (ID: %d)", member.display_name, member.user_id)
-                    for list_type in ["past_due", "due_today", "upcoming"]:
+                    for list_type in ["past_due", "due_today", "upcoming", "no_due_date"]:
                         entity = DonetickDateFilteredWithUnassignedList(coordinator, config_entry, hass, list_type, member=member)
                         entity._circle_members = circle_members
                         entities.append(entity)
@@ -863,12 +863,13 @@ class DonetickAssigneeTasksList(DonetickTodoListBase):
 
 
 class DonetickDateFilteredTasksList(DonetickTodoListBase):
-    """Donetick Date-Filtered Tasks List entity (Past Due, Due Today, Upcoming)."""
+    """Donetick Date-Filtered Tasks List entity (Past Due, Due Today, Upcoming, No Due Date)."""
 
     LIST_TYPE_NAMES = {
         "past_due": "Past Due",
         "due_today": "Due Today",
         "upcoming": "Upcoming",
+        "no_due_date": "No Due Date",
     }
 
     def __init__(
@@ -1193,9 +1194,14 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
                 if task.assigned_to is not None:
                     continue
             
-            # Filter by date
+            # Handle no_due_date list type specially
+            if self._list_type == "no_due_date":
+                if task.next_due_date is None:
+                    filtered.append(task)
+                continue
+            
+            # Filter by date - skip tasks without due date for other list types
             if task.next_due_date is None:
-                # Tasks without a due date are excluded from date-filtered lists
                 continue
             
             # Ensure task due date is timezone-aware for comparison
@@ -1217,6 +1223,7 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
                 # Upcoming: incomplete tasks with due date > end of today AND within upcoming_days
                 if task_due > today_end and task_due <= upcoming_cutoff:
                     filtered.append(task)
+            # no_due_date is handled separately below (doesn't need task_due)
         
         return filtered
 
@@ -1282,9 +1289,14 @@ class DonetickDateFilteredWithUnassignedList(DonetickDateFilteredTasksList):
             if task.assigned_to is not None and task.assigned_to != self._member.user_id:
                 continue
             
-            # Filter by date
+            # Handle no_due_date list type specially
+            if self._list_type == "no_due_date":
+                if task.next_due_date is None:
+                    filtered.append(task)
+                continue
+            
+            # Filter by date - skip tasks without due date for other list types
             if task.next_due_date is None:
-                # Tasks without a due date are excluded from date-filtered lists
                 continue
             
             # Ensure task due date is timezone-aware for comparison
