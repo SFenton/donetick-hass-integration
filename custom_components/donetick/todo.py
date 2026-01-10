@@ -603,6 +603,12 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         This ensures tasks move between lists at exactly the right moment,
         not just when the coordinator syncs.
         """
+        # Don't schedule if entity not yet added to hass
+        # Use self.hass (from CoordinatorEntity) or self._hass (stored in __init__)
+        hass = getattr(self, 'hass', None) or self._hass
+        if hass is None:
+            return
+        
         # Cancel any existing scheduled transition
         if self._scheduled_transition_cancel:
             self._scheduled_transition_cancel()
@@ -619,7 +625,7 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         )
         
         self._scheduled_transition_cancel = async_track_point_in_time(
-            self.hass,
+            hass,
             self._handle_transition_callback,
             next_transition
         )
@@ -645,6 +651,11 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         - upcoming: Tasks exit at midnight when they become due_today
         """
         if self.coordinator.data is None:
+            return None
+        
+        # Can't calculate without hass context
+        hass = getattr(self, 'hass', None) or self._hass
+        if hass is None:
             return None
         
         local_now = self._get_local_now()
@@ -686,7 +697,7 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
                 if task_due > today_end:
                     # Task is upcoming - will enter due_today at midnight
                     # Calculate midnight of the task's due date in local time
-                    task_local = task_due.astimezone(ZoneInfo(str(self.hass.config.time_zone)))
+                    task_local = task_due.astimezone(ZoneInfo(str(hass.config.time_zone)))
                     task_midnight = task_local.replace(hour=0, minute=0, second=0, microsecond=0)
                     if task_midnight > local_now:
                         next_times.append(task_midnight + buffer)
@@ -699,7 +710,7 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
                 # Tasks exit upcoming at midnight when they become due_today
                 if task_due > today_end:
                     # Calculate midnight of the task's due date
-                    task_local = task_due.astimezone(ZoneInfo(str(self.hass.config.time_zone)))
+                    task_local = task_due.astimezone(ZoneInfo(str(hass.config.time_zone)))
                     task_midnight = task_local.replace(hour=0, minute=0, second=0, microsecond=0)
                     if task_midnight > local_now:
                         next_times.append(task_midnight + buffer)
