@@ -491,6 +491,7 @@ class DonetickApiClient:
             if completion_window is not None:
                 payload["completionWindow"] = completion_window
             
+            _LOGGER.debug("Create task payload: %s", payload)
             endpoint = "/api/v1/chores/"
         else:
             # eAPI ChoreLiteReq - limited fields
