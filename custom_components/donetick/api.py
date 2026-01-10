@@ -444,11 +444,17 @@ class DonetickApiClient:
         With API key auth, only supports name, description, due_date, created_by.
         """
         if self.is_jwt_auth:
+            # If no assignees provided, use no_assignee strategy to avoid completion issues
+            effective_strategy = assign_strategy or ASSIGN_RANDOM
+            if not assignees:
+                effective_strategy = "no_assignee"
+            
             # Build full ChoreReq payload
             payload = {
                 "name": name,
                 "frequencyType": frequency_type or FREQUENCY_ONCE,
-                "assignStrategy": assign_strategy or ASSIGN_RANDOM,
+                "assignStrategy": effective_strategy,
+                "assignees": [],  # Always include empty array to avoid nil issues
             }
             
             if description:
