@@ -523,6 +523,14 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
             self._attr_unique_id = f"dt_{config_entry.entry_id}_unassigned_{list_type}"
             self._attr_name = f"Unassigned {list_type_name}"
 
+    @property
+    def todo_items(self) -> list[TodoItem] | None:
+        """Return todo items - always rebuild since filtering is time-sensitive."""
+        if self.coordinator.data is None:
+            return None
+        # Don't cache - time-based filtering needs fresh results every time
+        return self._build_todo_items()
+
     def _filter_tasks(self, tasks):
         """Filter tasks based on date and assignee criteria."""
         local_now = self._get_local_now()
