@@ -707,7 +707,12 @@ async def async_handle_notification_action(hass: HomeAssistant, event, entry: Co
 
 async def _handle_complete_action(hass: HomeAssistant, entry: ConfigEntry, task_id: int) -> None:
     """Handle the complete action from notification."""
+    from .todo import NotificationManager
+    
     _LOGGER.info("Completing task %d from notification action", task_id)
+    
+    # Cancel any scheduled reminder immediately
+    NotificationManager.cancel_reminder(task_id)
     
     client = _get_api_client(hass, entry.entry_id)
     
@@ -733,8 +738,12 @@ async def _handle_snooze_action(hass: HomeAssistant, entry: ConfigEntry, task_id
     """
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
+    from .todo import NotificationManager
     
     _LOGGER.info("Snoozing task %d for %d hours from notification action", task_id, hours)
+    
+    # Cancel any scheduled reminder immediately
+    NotificationManager.cancel_reminder(task_id)
     
     client = _get_api_client(hass, entry.entry_id)
     
