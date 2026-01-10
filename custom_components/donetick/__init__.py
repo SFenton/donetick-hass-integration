@@ -734,7 +734,7 @@ async def _handle_complete_action(hass: HomeAssistant, entry: ConfigEntry, task_
 async def _handle_snooze_action(hass: HomeAssistant, entry: ConfigEntry, task_id: int, hours: int) -> None:
     """Handle the snooze action from notification.
     
-    Snoozing updates the task's due date to now + hours.
+    Snoozing adds hours to the task's current due date.
     """
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
@@ -748,16 +748,35 @@ async def _handle_snooze_action(hass: HomeAssistant, entry: ConfigEntry, task_id
     client = _get_api_client(hass, entry.entry_id)
     
     try:
-        # Calculate new due date (now + hours in local timezone)
-        tz = ZoneInfo(hass.config.time_zone)
-        new_due_date = datetime.now(tz) + timedelta(hours=hours)
+        # Get the task's current due date from the coordinator
+        coordinator = hass.data[DOMAIN][entry.entry_id].get("coordinator")
+        if not coordinator or not coordinator.data:
+            _LOGGER.error("No coordinator data available to get task %d", task_id)
+            return
         
-        # Update the task's next due date (not the base due_date, but nextDueDate)
-        await client.async_update_task(
-            task_id=task_id,
-            next_due_date=new_due_date.isoformat()
+        task = coordinator.data.get(task_id)
+        if not task:
+            _LOGGER.error("Task %d not found in coordinator data", task_id)
+            return
+        
+        if not task.next_due_date:
+            _LOGGER.error("Task %d has no due date to snooze from", task_id)
+            return
+        
+        # Add hours to the current due date (not current time)
+        new_due_date = task.next_due_date + timedelta(hours=hours)
+        
+        # Use the dedicated due date update endpoint
+        success = await client.async_update_due_date(
+            chore_id=task_id,
+            due_date=new_due_date.isoformat()
         )
-        _LOGGER.info("Task %d snoozed to %s via notification action", task_id, new_due_date.isoformat())
+        
+        if success:
+            _LOGGER.info("Task %d snoozed from %s to %s via notification action", 
+                        task_id, task.next_due_date.isoformat(), new_due_date.isoformat())
+        else:
+            _LOGGER.error("Failed to update due date for task %d", task_id)
         
         # Trigger coordinator refresh
         await _refresh_todo_entities(hass, entry.entry_id)

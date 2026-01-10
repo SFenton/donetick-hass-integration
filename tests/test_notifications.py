@@ -418,8 +418,15 @@ class TestNotificationActionHandlers:
         """Test handling snooze 1 hour action from notification."""
         from custom_components.donetick import async_handle_notification_action
         
+        # Create a mock task with a due date
+        mock_task = MagicMock()
+        mock_task.next_due_date = datetime.now(ZoneInfo("America/New_York"))
+        
+        mock_coordinator = MagicMock()
+        mock_coordinator.data = {101: mock_task}
+        
         mock_hass.data[DOMAIN][mock_config_entry.entry_id] = {
-            "coordinator": MagicMock(),
+            "coordinator": mock_coordinator,
         }
         
         with patch("custom_components.donetick._get_api_client") as mock_get_client, \
@@ -427,6 +434,7 @@ class TestNotificationActionHandlers:
              patch("custom_components.donetick.todo.NotificationManager.cancel_reminder") as mock_cancel:
             
             mock_client = AsyncMock()
+            mock_client.async_update_due_date.return_value = True
             mock_get_client.return_value = mock_client
             
             await async_handle_notification_action(mock_hass, mock_event_snooze_1h, mock_config_entry)
@@ -434,11 +442,11 @@ class TestNotificationActionHandlers:
             # Verify reminder was cancelled
             mock_cancel.assert_called_once_with(101)
             
-            # Verify task was updated with new due date
-            mock_client.async_update_task.assert_called_once()
-            call_kwargs = mock_client.async_update_task.call_args[1]
-            assert call_kwargs["task_id"] == 101
-            assert "next_due_date" in call_kwargs
+            # Verify task due date was updated
+            mock_client.async_update_due_date.assert_called_once()
+            call_kwargs = mock_client.async_update_due_date.call_args[1]
+            assert call_kwargs["chore_id"] == 101
+            assert "due_date" in call_kwargs
             
             # Verify refresh was triggered
             mock_refresh.assert_called_once()
@@ -448,8 +456,15 @@ class TestNotificationActionHandlers:
         """Test handling snooze 1 day action from notification."""
         from custom_components.donetick import async_handle_notification_action
         
+        # Create a mock task with a due date
+        mock_task = MagicMock()
+        mock_task.next_due_date = datetime.now(ZoneInfo("America/New_York"))
+        
+        mock_coordinator = MagicMock()
+        mock_coordinator.data = {101: mock_task}
+        
         mock_hass.data[DOMAIN][mock_config_entry.entry_id] = {
-            "coordinator": MagicMock(),
+            "coordinator": mock_coordinator,
         }
         
         with patch("custom_components.donetick._get_api_client") as mock_get_client, \
@@ -457,6 +472,7 @@ class TestNotificationActionHandlers:
              patch("custom_components.donetick.todo.NotificationManager.cancel_reminder") as mock_cancel:
             
             mock_client = AsyncMock()
+            mock_client.async_update_due_date.return_value = True
             mock_get_client.return_value = mock_client
             
             await async_handle_notification_action(mock_hass, mock_event_snooze_1d, mock_config_entry)
@@ -464,8 +480,8 @@ class TestNotificationActionHandlers:
             # Verify reminder was cancelled
             mock_cancel.assert_called_once_with(101)
             
-            # Verify task was updated
-            mock_client.async_update_task.assert_called_once()
+            # Verify task due date was updated
+            mock_client.async_update_due_date.assert_called_once()
             
             # Verify refresh was triggered
             mock_refresh.assert_called_once()
@@ -521,11 +537,19 @@ class TestSnoozeTimeDelta:
 
     @pytest.mark.asyncio
     async def test_snooze_1h_correct_time_delta(self, mock_hass, mock_config_entry):
-        """Test snooze 1 hour calculates correct time delta."""
+        """Test snooze 1 hour adds 1 hour to the task's current due date."""
         from custom_components.donetick import _handle_snooze_action
         
+        # Create a task with a specific due date
+        original_due_date = datetime(2026, 1, 10, 9, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+        mock_task = MagicMock()
+        mock_task.next_due_date = original_due_date
+        
+        mock_coordinator = MagicMock()
+        mock_coordinator.data = {101: mock_task}
+        
         mock_hass.data[DOMAIN][mock_config_entry.entry_id] = {
-            "coordinator": MagicMock(),
+            "coordinator": mock_coordinator,
         }
         
         with patch("custom_components.donetick._get_api_client") as mock_get_client, \
@@ -533,29 +557,34 @@ class TestSnoozeTimeDelta:
              patch("custom_components.donetick.todo.NotificationManager.cancel_reminder"):
             
             mock_client = AsyncMock()
+            mock_client.async_update_due_date.return_value = True
             mock_get_client.return_value = mock_client
             
-            before = datetime.now(ZoneInfo("America/New_York"))
             await _handle_snooze_action(mock_hass, mock_config_entry, 101, hours=1)
-            after = datetime.now(ZoneInfo("America/New_York"))
             
-            # Check the next_due_date was set approximately 1 hour from now
-            call_kwargs = mock_client.async_update_task.call_args[1]
-            due_date_str = call_kwargs["next_due_date"]
+            # Check the due_date was set to original + 1 hour
+            call_kwargs = mock_client.async_update_due_date.call_args[1]
+            due_date_str = call_kwargs["due_date"]
             due_date = datetime.fromisoformat(due_date_str)
             
-            expected_min = before + timedelta(hours=1)
-            expected_max = after + timedelta(hours=1)
-            
-            assert expected_min <= due_date <= expected_max
+            expected = original_due_date + timedelta(hours=1)
+            assert due_date == expected
 
     @pytest.mark.asyncio
     async def test_snooze_1d_correct_time_delta(self, mock_hass, mock_config_entry):
-        """Test snooze 1 day calculates correct time delta."""
+        """Test snooze 1 day adds 24 hours to the task's current due date."""
         from custom_components.donetick import _handle_snooze_action
         
+        # Create a task with a specific due date
+        original_due_date = datetime(2026, 1, 10, 9, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+        mock_task = MagicMock()
+        mock_task.next_due_date = original_due_date
+        
+        mock_coordinator = MagicMock()
+        mock_coordinator.data = {101: mock_task}
+        
         mock_hass.data[DOMAIN][mock_config_entry.entry_id] = {
-            "coordinator": MagicMock(),
+            "coordinator": mock_coordinator,
         }
         
         with patch("custom_components.donetick._get_api_client") as mock_get_client, \
@@ -563,18 +592,15 @@ class TestSnoozeTimeDelta:
              patch("custom_components.donetick.todo.NotificationManager.cancel_reminder"):
             
             mock_client = AsyncMock()
+            mock_client.async_update_due_date.return_value = True
             mock_get_client.return_value = mock_client
             
-            before = datetime.now(ZoneInfo("America/New_York"))
             await _handle_snooze_action(mock_hass, mock_config_entry, 101, hours=24)
-            after = datetime.now(ZoneInfo("America/New_York"))
             
-            # Check the next_due_date was set approximately 24 hours from now
-            call_kwargs = mock_client.async_update_task.call_args[1]
-            due_date_str = call_kwargs["next_due_date"]
+            # Check the due_date was set to original + 24 hours
+            call_kwargs = mock_client.async_update_due_date.call_args[1]
+            due_date_str = call_kwargs["due_date"]
             due_date = datetime.fromisoformat(due_date_str)
             
-            expected_min = before + timedelta(hours=24)
-            expected_max = after + timedelta(hours=24)
-            
-            assert expected_min <= due_date <= expected_max
+            expected = original_due_date + timedelta(hours=24)
+            assert due_date == expected
