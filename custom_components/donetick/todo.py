@@ -195,8 +195,8 @@ class NotificationManager:
         # Determine interruption level based on priority
         interruption_level = self._get_interruption_level(task.priority)
         
-        # Build notification title - indicate it's unassigned
-        title = f"{task.name} · Unassigned · Past Due"
+        # Build notification title
+        title = f"{task.name} · Past Due"
         if is_reminder:
             title = f"Reminder: {title}"
         
