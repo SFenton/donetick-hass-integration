@@ -63,6 +63,15 @@ EVENT_DONETICK_THING_CHANGED = f"{DOMAIN}_thing_changed"
 CONF_NOTIFY_ON_PAST_DUE = "notify_on_past_due"
 CONF_ASSIGNEE_NOTIFICATIONS = "assignee_notifications"  # Dict mapping user_id -> notify service
 
+# Upcoming tasks configuration
+CONF_UPCOMING_DAYS = "upcoming_days"
+DEFAULT_UPCOMING_DAYS = 7
+MIN_UPCOMING_DAYS = 1
+MAX_UPCOMING_DAYS = 365
+
+# Include unassigned tasks in assignee lists
+CONF_INCLUDE_UNASSIGNED = "include_unassigned_in_assignee_lists"
+
 # Notification reminder interval (24 hours)
 NOTIFICATION_REMINDER_INTERVAL = 86400  # seconds
 

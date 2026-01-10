@@ -36,6 +36,11 @@ from .const import (
     DEFAULT_REFRESH_INTERVAL,
     CONF_NOTIFY_ON_PAST_DUE,
     CONF_ASSIGNEE_NOTIFICATIONS,
+    CONF_UPCOMING_DAYS,
+    DEFAULT_UPCOMING_DAYS,
+    MIN_UPCOMING_DAYS,
+    MAX_UPCOMING_DAYS,
+    CONF_INCLUDE_UNASSIGNED,
 )
 from .api import DonetickApiClient, AuthenticationError
 
@@ -218,6 +223,8 @@ class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_CREATE_DATE_FILTERED_LISTS: user_input.get(CONF_CREATE_DATE_FILTERED_LISTS, False),
                 CONF_REFRESH_INTERVAL: refresh_interval,
                 CONF_NOTIFY_ON_PAST_DUE: user_input.get(CONF_NOTIFY_ON_PAST_DUE, False),
+                CONF_UPCOMING_DAYS: user_input.get(CONF_UPCOMING_DAYS, DEFAULT_UPCOMING_DAYS),
+                CONF_INCLUDE_UNASSIGNED: user_input.get(CONF_INCLUDE_UNASSIGNED, False),
             }
             
             # If notifications enabled and we have circle members, proceed to notification config
@@ -243,6 +250,10 @@ class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ): DurationSelector(
                     DurationSelectorConfig(enable_day=False, allow_negative=False)
                 ),
+                vol.Optional(CONF_UPCOMING_DAYS, default=DEFAULT_UPCOMING_DAYS): vol.All(
+                    vol.Coerce(int), vol.Range(min=MIN_UPCOMING_DAYS, max=MAX_UPCOMING_DAYS)
+                ),
+                vol.Optional(CONF_INCLUDE_UNASSIGNED, default=False): bool,
                 vol.Optional(CONF_NOTIFY_ON_PAST_DUE, default=False): bool,
             }),
         )
@@ -337,6 +348,8 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_CREATE_DATE_FILTERED_LISTS: user_input.get(CONF_CREATE_DATE_FILTERED_LISTS, False),
                 CONF_REFRESH_INTERVAL: refresh_interval,
                 CONF_NOTIFY_ON_PAST_DUE: user_input.get(CONF_NOTIFY_ON_PAST_DUE, False),
+                CONF_UPCOMING_DAYS: user_input.get(CONF_UPCOMING_DAYS, DEFAULT_UPCOMING_DAYS),
+                CONF_INCLUDE_UNASSIGNED: user_input.get(CONF_INCLUDE_UNASSIGNED, False),
             }
             
             # Preserve auth credentials based on auth type
@@ -402,6 +415,16 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
                 ): DurationSelector(
                     DurationSelectorConfig(enable_day=False, allow_negative=False)
                 ),
+                vol.Optional(
+                    CONF_UPCOMING_DAYS,
+                    default=self.entry.data.get(CONF_UPCOMING_DAYS, DEFAULT_UPCOMING_DAYS)
+                ): vol.All(
+                    vol.Coerce(int), vol.Range(min=MIN_UPCOMING_DAYS, max=MAX_UPCOMING_DAYS)
+                ),
+                vol.Optional(
+                    CONF_INCLUDE_UNASSIGNED,
+                    default=self.entry.data.get(CONF_INCLUDE_UNASSIGNED, False)
+                ): bool,
                 vol.Optional(
                     CONF_NOTIFY_ON_PAST_DUE,
                     default=self.entry.data.get(CONF_NOTIFY_ON_PAST_DUE, False)

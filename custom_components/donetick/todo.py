@@ -42,6 +42,9 @@ from .const import (
     NOTIFICATION_REMINDER_INTERVAL,
     PRIORITY_P1,
     PRIORITY_P2,
+    CONF_UPCOMING_DAYS,
+    DEFAULT_UPCOMING_DAYS,
+    CONF_INCLUDE_UNASSIGNED,
 )
 from .api import DonetickApiClient
 from .model import DonetickTask, DonetickMember
@@ -72,6 +75,15 @@ class NotificationManager:
         
         mappings = self._config_entry.data.get(CONF_ASSIGNEE_NOTIFICATIONS, {})
         return mappings.get(str(assignee_id))
+    
+    def get_all_notify_services(self) -> list[tuple[str, str]]:
+        """Get all configured notification services.
+        
+        Returns a list of (user_id, notify_service) tuples for all users
+        who have a notification service configured.
+        """
+        mappings = self._config_entry.data.get(CONF_ASSIGNEE_NOTIFICATIONS, {})
+        return [(user_id, service) for user_id, service in mappings.items() if service]
     
     def _get_interruption_level(self, priority: int | None) -> str:
         """Determine interruption level based on task priority."""
@@ -163,6 +175,88 @@ class NotificationManager:
             _LOGGER.error("Failed to send notification for task '%s': %s", task.name, e)
             return False
     
+    async def send_unassigned_past_due_notification(
+        self,
+        task: DonetickTask,
+        is_reminder: bool = False
+    ) -> int:
+        """Send a notification for an unassigned past-due task to ALL configured users.
+        
+        Returns the number of notifications sent successfully.
+        """
+        if not self.is_enabled():
+            return 0
+        
+        all_services = self.get_all_notify_services()
+        if not all_services:
+            _LOGGER.debug("No notify services configured for unassigned task notification")
+            return 0
+        
+        # Determine interruption level based on priority
+        interruption_level = self._get_interruption_level(task.priority)
+        
+        # Build notification title - indicate it's unassigned
+        title = f"{task.name} · Unassigned · Past Due"
+        if is_reminder:
+            title = f"Reminder: {title}"
+        
+        # Build notification data with actionable buttons
+        data = {
+            "title": title,
+            "message": "An unassigned task is past due. Please assign it or complete it.",
+            "data": {
+                "url": "/at-a-glance/chores",
+                "clickAction": "/at-a-glance/chores",
+                "tag": f"donetick_unassigned_task_{task.id}",  # Allows replacing/dismissing notification
+                "push": {
+                    "sound": "default",
+                    "interruption-level": interruption_level,
+                },
+                # Action buttons for iOS/Android companion app
+                "actions": [
+                    {
+                        "action": f"DONETICK_COMPLETE_{task.id}",
+                        "title": "Complete",
+                    },
+                    {
+                        "action": f"DONETICK_SNOOZE_1H_{task.id}",
+                        "title": "Snooze 1 Hour",
+                    },
+                    {
+                        "action": f"DONETICK_SNOOZE_1D_{task.id}",
+                        "title": "Snooze 1 Day",
+                    },
+                ],
+            },
+        }
+        
+        sent_count = 0
+        for user_id, notify_service in all_services:
+            if not notify_service.startswith("notify."):
+                _LOGGER.warning("Invalid notify service format: %s", notify_service)
+                continue
+            
+            service_name = notify_service.replace("notify.", "")
+            
+            try:
+                await self._hass.services.async_call(
+                    "notify",
+                    service_name,
+                    data,
+                    blocking=True,
+                )
+                _LOGGER.info(
+                    "Sent %s unassigned notification for task '%s' to user %s",
+                    "reminder" if is_reminder else "initial",
+                    task.name,
+                    user_id
+                )
+                sent_count += 1
+            except Exception as e:
+                _LOGGER.error("Failed to send unassigned notification for task '%s' to user %s: %s", task.name, user_id, e)
+        
+        return sent_count
+    
     def schedule_reminder(
         self,
         task: DonetickTask,
@@ -227,16 +321,86 @@ class NotificationManager:
         
         return cancel
     
-    @staticmethod
-    def cancel_reminder(task_id: int) -> None:
-        """Cancel a scheduled reminder for a task."""
+    def schedule_unassigned_reminder(
+        self,
+        task: DonetickTask,
+        reminder_time: datetime
+    ) -> Callable | None:
+        """Schedule a reminder notification for an unassigned task.
+        
+        This will notify ALL configured users when the reminder fires.
+        Returns a cancel callback if scheduled successfully.
+        """
         global _notification_reminders
         
-        if task_id in _notification_reminders:
-            cancel, _ = _notification_reminders[task_id]
+        if not self.is_enabled():
+            return None
+        
+        # Use a distinct key for unassigned task reminders
+        reminder_key = f"unassigned_{task.id}"
+        
+        # Check if reminder already scheduled
+        if reminder_key in _notification_reminders:
+            existing_cancel, existing_time = _notification_reminders[reminder_key]
+            if existing_time == reminder_time:
+                _LOGGER.debug("Unassigned reminder already scheduled for task %d at %s", task.id, reminder_time)
+                return existing_cancel
+            existing_cancel()
+            del _notification_reminders[reminder_key]
+        
+        async def reminder_callback(now: datetime) -> None:
+            """Handle reminder callback."""
+            global _notification_reminders
+            
+            if reminder_key in _notification_reminders:
+                del _notification_reminders[reminder_key]
+            
+            coordinator = self._hass.data.get(DOMAIN, {}).get(
+                self._config_entry.entry_id, {}
+            ).get("coordinator")
+            
+            if coordinator and coordinator.data:
+                current_task = coordinator.data.get(task.id)
+                # Check if task is still unassigned, active, and exists
+                if current_task and current_task.is_active and current_task.assigned_to is None:
+                    await self.send_unassigned_past_due_notification(current_task, is_reminder=True)
+                    
+                    next_reminder = now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
+                    self.schedule_unassigned_reminder(current_task, next_reminder)
+                else:
+                    _LOGGER.debug("Task %d no longer unassigned or active, skipping reminder", task.id)
+        
+        cancel = async_track_point_in_time(
+            self._hass,
+            reminder_callback,
+            reminder_time
+        )
+        
+        _notification_reminders[reminder_key] = (cancel, reminder_time)
+        _LOGGER.debug(
+            "Scheduled unassigned reminder for task '%s' (ID: %d) at %s",
+            task.name, task.id, reminder_time.isoformat()
+        )
+        
+        return cancel
+    
+    @staticmethod
+    def cancel_reminder(task_id: int, is_unassigned: bool = False) -> None:
+        """Cancel a scheduled reminder for a task.
+        
+        Args:
+            task_id: The task ID to cancel reminders for.
+            is_unassigned: If True, cancel the unassigned reminder instead of the regular one.
+        """
+        global _notification_reminders
+        
+        reminder_key = f"unassigned_{task_id}" if is_unassigned else task_id
+        
+        if reminder_key in _notification_reminders:
+            cancel, _ = _notification_reminders[reminder_key]
             cancel()
-            del _notification_reminders[task_id]
-            _LOGGER.debug("Cancelled reminder for task %d", task_id)
+            del _notification_reminders[reminder_key]
+            _LOGGER.debug("Cancelled %s reminder for task %d", "unassigned" if is_unassigned else "assigned", task_id)
 
 
 class DonetickTaskCoordinator(DataUpdateCoordinator):
@@ -416,6 +580,8 @@ async def async_setup_entry(
     
     # Create date-filtered sub-lists if enabled
     create_date_filtered = config_entry.options.get(CONF_CREATE_DATE_FILTERED_LISTS, config_entry.data.get(CONF_CREATE_DATE_FILTERED_LISTS, False))
+    include_unassigned = config_entry.options.get(CONF_INCLUDE_UNASSIGNED, config_entry.data.get(CONF_INCLUDE_UNASSIGNED, False))
+    
     if create_date_filtered:
         _LOGGER.debug("Date-filtered lists enabled in config")
         
@@ -434,6 +600,14 @@ async def async_setup_entry(
                     entity = DonetickDateFilteredTasksList(coordinator, config_entry, hass, list_type, member=member)
                     entity._circle_members = circle_members
                     entities.append(entity)
+                
+                # If include_unassigned is enabled, also create "With Unassigned" lists
+                if include_unassigned:
+                    _LOGGER.debug("Creating 'With Unassigned' lists for member: %s (ID: %d)", member.display_name, member.user_id)
+                    for list_type in ["past_due", "due_today", "upcoming"]:
+                        entity = DonetickDateFilteredWithUnassignedList(coordinator, config_entry, hass, list_type, member=member)
+                        entity._circle_members = circle_members
+                        entities.append(entity)
     else:
         _LOGGER.debug("Date-filtered lists not enabled in config")
     
@@ -802,8 +976,9 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
             self._scheduled_transition_cancel = None
         
         # Cancel any scheduled reminders for this entity's tasks
+        is_unassigned = self._member is None
         for task_id in list(self._notified_task_ids):
-            NotificationManager.cancel_reminder(task_id)
+            NotificationManager.cancel_reminder(task_id, is_unassigned=is_unassigned)
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -836,9 +1011,12 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         # Find tasks no longer past due (completed/deleted/rescheduled)
         resolved_tasks = self._notified_task_ids - current_task_ids
         
+        # Determine if this is an unassigned list
+        is_unassigned = self._member is None
+        
         # Cancel reminders for resolved tasks
         for task_id in resolved_tasks:
-            NotificationManager.cancel_reminder(task_id)
+            NotificationManager.cancel_reminder(task_id, is_unassigned=is_unassigned)
         
         # Update our tracking set
         self._notified_task_ids = current_task_ids.copy()
@@ -846,12 +1024,22 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         # Send notifications for newly past due tasks
         for task in filtered_tasks:
             if task.id in new_past_due:
-                sent = await self._notification_manager.send_past_due_notification(task)
-                if sent:
-                    # Schedule reminder for 24 hours from now
-                    local_now = self._get_local_now()
-                    reminder_time = local_now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
-                    self._notification_manager.schedule_reminder(task, reminder_time)
+                if is_unassigned:
+                    # For unassigned tasks, notify ALL configured users
+                    sent_count = await self._notification_manager.send_unassigned_past_due_notification(task)
+                    if sent_count > 0:
+                        # Schedule reminder for 24 hours from now
+                        local_now = self._get_local_now()
+                        reminder_time = local_now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
+                        self._notification_manager.schedule_unassigned_reminder(task, reminder_time)
+                else:
+                    # For assigned tasks, notify the specific assignee
+                    sent = await self._notification_manager.send_past_due_notification(task)
+                    if sent:
+                        # Schedule reminder for 24 hours from now
+                        local_now = self._get_local_now()
+                        reminder_time = local_now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
+                        self._notification_manager.schedule_reminder(task, reminder_time)
 
     def _schedule_next_transition(self) -> None:
         """Schedule a state update at the next task transition time.
@@ -986,6 +1174,10 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         today_start = self._get_local_today_start()
         today_end = self._get_local_today_end()
         
+        # Get upcoming days limit from config
+        upcoming_days = self._config_entry.data.get(CONF_UPCOMING_DAYS, DEFAULT_UPCOMING_DAYS)
+        upcoming_cutoff = today_end + timedelta(days=upcoming_days)
+        
         filtered = []
         for task in tasks:
             if not task.is_active:
@@ -1022,11 +1214,153 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
                 if today_start <= task_due <= today_end and task_due >= local_now:
                     filtered.append(task)
             elif self._list_type == "upcoming":
-                # Upcoming: incomplete tasks with due date > end of today
-                if task_due > today_end:
+                # Upcoming: incomplete tasks with due date > end of today AND within upcoming_days
+                if task_due > today_end and task_due <= upcoming_cutoff:
                     filtered.append(task)
         
         return filtered
+
+
+class DonetickDateFilteredWithUnassignedList(DonetickDateFilteredTasksList):
+    """Donetick Date-Filtered Tasks List that includes unassigned tasks.
+    
+    This creates lists like "Stephen's Upcoming With Unassigned" that show
+    both the assignee's tasks and any unassigned tasks.
+    
+    These lists do NOT trigger notifications - notifications are handled by the
+    regular assignee lists and the separate unassigned past due notifications.
+    """
+
+    def __init__(
+        self, 
+        coordinator: DataUpdateCoordinator, 
+        config_entry: ConfigEntry, 
+        hass: HomeAssistant,
+        list_type: str,
+        member: DonetickMember
+    ) -> None:
+        """Initialize the Date-Filtered With Unassigned Tasks List."""
+        # Initialize parent but we'll override the unique_id and name
+        super().__init__(coordinator, config_entry, hass, list_type, member)
+        
+        list_type_name = self.LIST_TYPE_NAMES.get(list_type, list_type.replace("_", " ").title())
+        
+        # Override unique_id and name to indicate "With Unassigned"
+        self._attr_unique_id = f"dt_{config_entry.entry_id}_{member.user_id}_{list_type}_with_unassigned"
+        self._attr_name = f"{member.display_name}'s {list_type_name} With Unassigned"
+        
+        # Disable notification manager for these lists - they don't trigger notifications
+        self._notification_manager = None
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity being added to Home Assistant.
+        
+        Override to skip notification setup - these lists don't trigger notifications.
+        """
+        # Call grandparent's async_added_to_hass, skipping parent's notification setup
+        await CoordinatorEntity.async_added_to_hass(self)
+        
+        # Schedule the first transition check
+        self._schedule_next_transition()
+
+    def _filter_tasks(self, tasks):
+        """Filter tasks to include both assignee's tasks and unassigned tasks."""
+        local_now = self._get_local_now()
+        today_start = self._get_local_today_start()
+        today_end = self._get_local_today_end()
+        
+        # Get upcoming days limit from config
+        upcoming_days = self._config_entry.data.get(CONF_UPCOMING_DAYS, DEFAULT_UPCOMING_DAYS)
+        upcoming_cutoff = today_end + timedelta(days=upcoming_days)
+        
+        filtered = []
+        for task in tasks:
+            if not task.is_active:
+                continue
+            
+            # Include tasks assigned to this member OR unassigned tasks
+            if task.assigned_to is not None and task.assigned_to != self._member.user_id:
+                continue
+            
+            # Filter by date
+            if task.next_due_date is None:
+                # Tasks without a due date are excluded from date-filtered lists
+                continue
+            
+            # Ensure task due date is timezone-aware for comparison
+            task_due = task.next_due_date
+            if task_due.tzinfo is None:
+                task_due = task_due.replace(tzinfo=ZoneInfo("UTC"))
+            
+            if self._list_type == "past_due":
+                if task_due < local_now:
+                    filtered.append(task)
+            elif self._list_type == "due_today":
+                if today_start <= task_due <= today_end and task_due >= local_now:
+                    filtered.append(task)
+            elif self._list_type == "upcoming":
+                if task_due > today_end and task_due <= upcoming_cutoff:
+                    filtered.append(task)
+        
+        return filtered
+
+    def _calculate_next_transition_time(self) -> Optional[datetime]:
+        """Calculate when the next task will transition.
+        
+        Override to include both assignee's tasks and unassigned tasks.
+        """
+        if self.coordinator.data is None:
+            return None
+        
+        hass = getattr(self, 'hass', None) or self._hass
+        if hass is None:
+            return None
+        
+        local_now = self._get_local_now()
+        today_start = self._get_local_today_start()
+        today_end = self._get_local_today_end()
+        
+        buffer = timedelta(seconds=1)
+        
+        next_times: list[datetime] = []
+        
+        for task in self.coordinator.tasks_list:
+            if not task.is_active or task.next_due_date is None:
+                continue
+            
+            # Include tasks assigned to this member OR unassigned tasks
+            if task.assigned_to is not None and task.assigned_to != self._member.user_id:
+                continue
+            
+            task_due = task.next_due_date
+            if task_due.tzinfo is None:
+                task_due = task_due.replace(tzinfo=ZoneInfo("UTC"))
+            
+            if self._list_type == "past_due":
+                if today_start <= task_due <= today_end and task_due > local_now:
+                    next_times.append(task_due + buffer)
+                    
+            elif self._list_type == "due_today":
+                if task_due > today_end:
+                    task_local = task_due.astimezone(ZoneInfo(str(hass.config.time_zone)))
+                    task_midnight = task_local.replace(hour=0, minute=0, second=0, microsecond=0)
+                    if task_midnight > local_now:
+                        next_times.append(task_midnight + buffer)
+                
+                elif today_start <= task_due <= today_end and task_due > local_now:
+                    next_times.append(task_due + buffer)
+                    
+            elif self._list_type == "upcoming":
+                if task_due > today_end:
+                    task_local = task_due.astimezone(ZoneInfo(str(hass.config.time_zone)))
+                    task_midnight = task_local.replace(hour=0, minute=0, second=0, microsecond=0)
+                    if task_midnight > local_now:
+                        next_times.append(task_midnight + buffer)
+        
+        if not next_times:
+            return None
+        
+        return min(next_times)
 
 
 # Keep the old class for backward compatibility
