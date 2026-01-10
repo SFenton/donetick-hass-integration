@@ -79,8 +79,7 @@ create_task:
             - "yearly"
             - "interval"
             - "days_of_the_week"
-            - "day_of_the_month"
-            - "no_repeat"
+            - "adaptive"
     frequency:
       name: Frequency Value
       description: Frequency interval (e.g., every 2 days) - Requires username/password auth
@@ -196,8 +195,7 @@ update_task:
             - "yearly"
             - "interval"
             - "days_of_the_week"
-            - "day_of_the_month"
-            - "no_repeat"
+            - "adaptive"
     frequency:
       name: Frequency Value
       description: Frequency interval (e.g., every 2 days) - Requires username/password auth
@@ -340,9 +338,13 @@ create_task_form:
               value: "yearly"
             - label: "Custom Interval"
               value: "interval"
+            - label: "Specific Days of Week"
+              value: "days_of_the_week"
+            - label: "Adaptive (learns from completions)"
+              value: "adaptive"
     recurrence_interval:
-      name: Repeat Every (days)
-      description: For custom interval - repeat every N days
+      name: Repeat Every
+      description: For custom interval - how often to repeat
       required: false
       default: 1
       selector:
@@ -350,7 +352,46 @@ create_task_form:
           min: 1
           max: 365
           mode: box
-          unit_of_measurement: "days"
+    recurrence_unit:
+      name: Interval Unit
+      description: Unit for custom interval (days, weeks, months, or years)
+      required: false
+      default: "days"
+      selector:
+        select:
+          mode: dropdown
+          options:
+            - label: "Days"
+              value: "days"
+            - label: "Weeks"
+              value: "weeks"
+            - label: "Months"
+              value: "months"
+            - label: "Years"
+              value: "years"
+    recurrence_days:
+      name: Days of Week
+      description: Select which days this task should repeat on (for 'Specific Days of Week' recurrence)
+      required: false
+      selector:
+        select:
+          multiple: true
+          mode: list
+          options:
+            - label: "Monday"
+              value: "monday"
+            - label: "Tuesday"
+              value: "tuesday"
+            - label: "Wednesday"
+              value: "wednesday"
+            - label: "Thursday"
+              value: "thursday"
+            - label: "Friday"
+              value: "friday"
+            - label: "Saturday"
+              value: "saturday"
+            - label: "Sunday"
+              value: "sunday"
     assignees:
       name: Assign To
       description: Select one or more assignees (leave empty for unassigned). Enter comma-separated user IDs, or leave blank to fetch from your circle.

@@ -424,14 +424,20 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
     priority = priority_map.get(priority_str, 0)
     
     # Map recurrence to frequency_type
+    # Note: Donetick uses "once" for one-time tasks, not "no_repeat"
     recurrence = call.data.get("recurrence", "no_repeat")
-    frequency_type = recurrence
+    if recurrence == "no_repeat":
+        frequency_type = "once"
+    else:
+        frequency_type = recurrence
     
     # Get interval for custom recurrence
     frequency = None
-    frequency_metadata = None
+    frequency_metadata = {}  # Always use empty dict, not None
+    interval_unit = "days"  # Default unit for interval
     if recurrence == "interval":
         frequency = call.data.get("recurrence_interval", 1)
+        interval_unit = call.data.get("recurrence_unit", "days")
     
     # Build frequency_metadata with timezone info for recurring tasks
     # This is required by Donetick for proper next-due-date calculation
@@ -447,7 +453,9 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
             "weekly": "weeks", 
             "monthly": "months",
             "yearly": "years",
-            "interval": "days",  # Default to days for interval
+            "interval": interval_unit,  # Use user-selected unit for interval
+            "days_of_the_week": "days",  # days_of_the_week uses days
+            "adaptive": "days",  # adaptive defaults to days
         }
         unit = unit_map.get(recurrence, "days")
         
@@ -457,9 +465,23 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
             "unit": unit,
         }
         
+        # Handle days_of_the_week - add selected days to metadata
+        if recurrence == "days_of_the_week":
+            recurrence_days = call.data.get("recurrence_days")
+            if recurrence_days:
+                # recurrence_days is a list of day names like ["monday", "wednesday"]
+                frequency_metadata["days"] = list(recurrence_days)
+            else:
+                # If no days selected, default to current day
+                current_day = now_local.strftime("%A").lower()
+                frequency_metadata["days"] = [current_day]
+        
         # Set default frequency for non-interval types
         if frequency is None:
             frequency = 1
+    else:
+        # For "once" (no_repeat) tasks, still need frequency = 1
+        frequency = 1
     
     # Parse assignees from comma-separated string to list of ints
     assignees_str = call.data.get("assignees")
