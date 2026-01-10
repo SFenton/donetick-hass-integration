@@ -32,8 +32,13 @@
                     "create_unified_list": "Create 'All Tasks' list",
                     "create_assignee_lists": "Create individual task lists per person",
                     "create_date_filtered_lists": "Create date-filtered sub-lists (Past Due, Due Today, Upcoming)",
-                    "refresh_interval": "Sync interval"
+                    "refresh_interval": "Sync interval",
+                    "notify_on_past_due": "Send notifications when tasks become past due"
                 }
+            },
+            "notifications": {
+                "title": "Configure Notifications",
+                "description": "Select which notification service to use for each person. Leave empty to skip notifications for that person."
             }
         },
         "error": {
@@ -53,8 +58,13 @@
                     "create_unified_list": "Create 'All Tasks' list",
                     "create_assignee_lists": "Create individual task lists per person",
                     "create_date_filtered_lists": "Create date-filtered sub-lists (Past Due, Due Today, Upcoming)",
-                    "refresh_interval": "Sync interval"
+                    "refresh_interval": "Sync interval",
+                    "notify_on_past_due": "Send notifications when tasks become past due"
                 }
+            },
+            "notifications": {
+                "title": "Configure Notifications",
+                "description": "Select which notification service to use for each person. Leave empty to skip notifications for that person."
             }
         },
         "error": {

@@ -34,6 +34,8 @@ from .const import (
     CONF_CREATE_DATE_FILTERED_LISTS,
     CONF_REFRESH_INTERVAL,
     DEFAULT_REFRESH_INTERVAL,
+    CONF_NOTIFY_ON_PAST_DUE,
+    CONF_ASSIGNEE_NOTIFICATIONS,
 )
 from .api import DonetickApiClient, AuthenticationError
 
@@ -66,6 +68,8 @@ class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self):
         """Initialize the config flow."""
         self._server_data = {}
+        self._circle_members = []  # Store circle members for notification config
+        self._api_client = None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -120,10 +124,18 @@ class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 # Test the API connection
                 await client.async_get_tasks()
+                
+                # Fetch circle members for notification config
+                try:
+                    self._circle_members = await client.async_get_circle_members()
+                except Exception as e:
+                    _LOGGER.warning("Could not fetch circle members: %s", e)
+                    self._circle_members = []
 
                 # Store credentials and proceed to options step
                 self._server_data[CONF_USERNAME] = user_input[CONF_USERNAME]
                 self._server_data[CONF_PASSWORD] = user_input[CONF_PASSWORD]
+                self._api_client = client
                 return await self.async_step_options()
                 
             except AuthenticationError as err:
@@ -205,7 +217,13 @@ class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_CREATE_ASSIGNEE_LISTS: user_input.get(CONF_CREATE_ASSIGNEE_LISTS, False),
                 CONF_CREATE_DATE_FILTERED_LISTS: user_input.get(CONF_CREATE_DATE_FILTERED_LISTS, False),
                 CONF_REFRESH_INTERVAL: refresh_interval,
+                CONF_NOTIFY_ON_PAST_DUE: user_input.get(CONF_NOTIFY_ON_PAST_DUE, False),
             }
+            
+            # If notifications enabled and we have circle members, proceed to notification config
+            if user_input.get(CONF_NOTIFY_ON_PAST_DUE, False) and self._circle_members:
+                self._server_data = final_data
+                return await self.async_step_notifications()
             
             return self.async_create_entry(
                 title="Donetick",
@@ -225,7 +243,64 @@ class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ): DurationSelector(
                     DurationSelectorConfig(enable_day=False, allow_negative=False)
                 ),
+                vol.Optional(CONF_NOTIFY_ON_PAST_DUE, default=False): bool,
             }),
+        )
+
+    async def async_step_notifications(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure notification services for each assignee."""
+        if user_input is not None:
+            # Build assignee notifications mapping
+            assignee_notifications = {}
+            for member in self._circle_members:
+                if member.is_active:
+                    key = f"notify_{member.user_id}"
+                    notify_service = user_input.get(key)
+                    if notify_service:
+                        assignee_notifications[str(member.user_id)] = notify_service
+            
+            final_data = {
+                **self._server_data,
+                CONF_ASSIGNEE_NOTIFICATIONS: assignee_notifications,
+            }
+            
+            return self.async_create_entry(
+                title="Donetick",
+                data=final_data,
+            )
+
+        # Build schema with a notify service selector for each active member
+        schema_dict = {}
+        
+        # Get available notify services
+        notify_services = []
+        for service in self.hass.services.async_services().get("notify", {}):
+            notify_services.append({"value": f"notify.{service}", "label": f"notify.{service}"})
+        
+        if not notify_services:
+            notify_services = [{"value": "", "label": "No notify services found"}]
+        
+        for member in self._circle_members:
+            if member.is_active:
+                schema_dict[vol.Optional(f"notify_{member.user_id}")] = SelectSelector(
+                    SelectSelectorConfig(
+                        options=notify_services,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                )
+        
+        # Build description placeholders for member names
+        member_descriptions = {
+            f"member_{m.user_id}": m.display_name 
+            for m in self._circle_members if m.is_active
+        }
+
+        return self.async_show_form(
+            step_id="notifications",
+            data_schema=vol.Schema(schema_dict),
+            description_placeholders=member_descriptions,
         )
 
     @staticmethod
@@ -241,6 +316,8 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         """Initialize options flow."""
         self.entry = config_entry
+        self._updated_data = {}
+        self._circle_members = []
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -260,6 +337,7 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_CREATE_ASSIGNEE_LISTS: user_input.get(CONF_CREATE_ASSIGNEE_LISTS, False),
                 CONF_CREATE_DATE_FILTERED_LISTS: user_input.get(CONF_CREATE_DATE_FILTERED_LISTS, False),
                 CONF_REFRESH_INTERVAL: refresh_interval,
+                CONF_NOTIFY_ON_PAST_DUE: user_input.get(CONF_NOTIFY_ON_PAST_DUE, False),
             }
             
             # Preserve auth credentials based on auth type
@@ -269,6 +347,20 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
                 data[CONF_PASSWORD] = self.entry.data.get(CONF_PASSWORD)
             else:
                 data[CONF_TOKEN] = self.entry.data.get(CONF_TOKEN)
+
+            # If notifications enabled, proceed to notification config
+            if user_input.get(CONF_NOTIFY_ON_PAST_DUE, False):
+                self._updated_data = data
+                # Fetch circle members
+                await self._fetch_circle_members()
+                if self._circle_members:
+                    return await self.async_step_notifications()
+            
+            # Preserve existing assignee notifications if not reconfiguring
+            if not user_input.get(CONF_NOTIFY_ON_PAST_DUE, False):
+                data[CONF_ASSIGNEE_NOTIFICATIONS] = {}
+            else:
+                data[CONF_ASSIGNEE_NOTIFICATIONS] = self.entry.data.get(CONF_ASSIGNEE_NOTIFICATIONS, {})
 
             # Workaround to update config entry data from options flow
             self.hass.config_entries.async_update_entry(
@@ -311,9 +403,95 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
                 ): DurationSelector(
                     DurationSelectorConfig(enable_day=False, allow_negative=False)
                 ),
+                vol.Optional(
+                    CONF_NOTIFY_ON_PAST_DUE,
+                    default=self.entry.data.get(CONF_NOTIFY_ON_PAST_DUE, False)
+                ): bool,
             }),
             description_placeholders={
                 "auth_type": auth_type_label,
                 "url": self.entry.data.get(CONF_URL, ""),
             },
+        )
+
+    async def _fetch_circle_members(self) -> None:
+        """Fetch circle members from the API."""
+        try:
+            session = async_get_clientsession(self.hass)
+            auth_type = self.entry.data.get(CONF_AUTH_TYPE, AUTH_TYPE_API_KEY)
+            
+            if auth_type == AUTH_TYPE_JWT:
+                client = DonetickApiClient(
+                    self.entry.data[CONF_URL],
+                    session,
+                    username=self.entry.data.get(CONF_USERNAME),
+                    password=self.entry.data.get(CONF_PASSWORD),
+                    auth_type=AUTH_TYPE_JWT,
+                )
+            else:
+                client = DonetickApiClient(
+                    self.entry.data[CONF_URL],
+                    session,
+                    api_token=self.entry.data.get(CONF_TOKEN),
+                    auth_type=AUTH_TYPE_API_KEY,
+                )
+            
+            self._circle_members = await client.async_get_circle_members()
+        except Exception as e:
+            _LOGGER.warning("Could not fetch circle members: %s", e)
+            self._circle_members = []
+
+    async def async_step_notifications(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure notification services for each assignee."""
+        if user_input is not None:
+            # Build assignee notifications mapping
+            assignee_notifications = {}
+            for member in self._circle_members:
+                if member.is_active:
+                    key = f"notify_{member.user_id}"
+                    notify_service = user_input.get(key)
+                    if notify_service:
+                        assignee_notifications[str(member.user_id)] = notify_service
+            
+            data = {
+                **self._updated_data,
+                CONF_ASSIGNEE_NOTIFICATIONS: assignee_notifications,
+            }
+            
+            # Update config entry
+            self.hass.config_entries.async_update_entry(
+                self.entry, data=data, options=self.entry.options
+            )
+            self.hass.async_create_task(
+                self.hass.config_entries.async_reload(self.entry.entry_id)
+            )
+            self.async_abort(reason="configuration updated")
+            return self.async_create_entry(title="", data={})
+
+        # Build schema with a notify service selector for each active member
+        schema_dict = {}
+        
+        # Get available notify services
+        notify_services = [{"value": "", "label": "(None)"}]
+        for service in self.hass.services.async_services().get("notify", {}):
+            notify_services.append({"value": f"notify.{service}", "label": f"notify.{service}"})
+        
+        # Get existing mappings
+        existing_mappings = self.entry.data.get(CONF_ASSIGNEE_NOTIFICATIONS, {})
+        
+        for member in self._circle_members:
+            if member.is_active:
+                default_value = existing_mappings.get(str(member.user_id), "")
+                schema_dict[vol.Optional(f"notify_{member.user_id}", default=default_value)] = SelectSelector(
+                    SelectSelectorConfig(
+                        options=notify_services,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                )
+
+        return self.async_show_form(
+            step_id="notifications",
+            data_schema=vol.Schema(schema_dict),
         )

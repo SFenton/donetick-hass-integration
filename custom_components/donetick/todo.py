@@ -1,7 +1,7 @@
 """Todo for Donetick integration."""
 import logging
 from datetime import datetime, timedelta, date
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 import hashlib
 import json
@@ -37,11 +37,190 @@ from .const import (
     CONF_CREATE_DATE_FILTERED_LISTS,
     CONF_REFRESH_INTERVAL,
     DEFAULT_REFRESH_INTERVAL,
+    CONF_NOTIFY_ON_PAST_DUE,
+    CONF_ASSIGNEE_NOTIFICATIONS,
+    NOTIFICATION_REMINDER_INTERVAL,
+    PRIORITY_P1,
+    PRIORITY_P2,
 )
 from .api import DonetickApiClient
 from .model import DonetickTask, DonetickMember
 
 _LOGGER = logging.getLogger(__name__)
+
+# Global tracker for notification reminders to prevent duplicates across entities
+# Key: task_id, Value: (cancel_callback, scheduled_time)
+_notification_reminders: dict[int, tuple[Callable, datetime]] = {}
+
+
+class NotificationManager:
+    """Manages past-due notifications for tasks."""
+    
+    def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
+        """Initialize the notification manager."""
+        self._hass = hass
+        self._config_entry = config_entry
+    
+    def is_enabled(self) -> bool:
+        """Check if notifications are enabled."""
+        return self._config_entry.data.get(CONF_NOTIFY_ON_PAST_DUE, False)
+    
+    def get_notify_service(self, assignee_id: int | None) -> str | None:
+        """Get the notification service for a given assignee."""
+        if assignee_id is None:
+            return None
+        
+        mappings = self._config_entry.data.get(CONF_ASSIGNEE_NOTIFICATIONS, {})
+        return mappings.get(str(assignee_id))
+    
+    def _get_interruption_level(self, priority: int | None) -> str:
+        """Determine interruption level based on task priority."""
+        if priority == PRIORITY_P1:
+            return "critical"
+        elif priority == PRIORITY_P2:
+            return "time-sensitive"
+        else:
+            return "passive"
+    
+    async def send_past_due_notification(
+        self,
+        task: DonetickTask,
+        is_reminder: bool = False
+    ) -> bool:
+        """Send a notification for a past-due task.
+        
+        Returns True if notification was sent successfully.
+        """
+        if not self.is_enabled():
+            return False
+        
+        notify_service = self.get_notify_service(task.assigned_to)
+        if not notify_service:
+            _LOGGER.debug("No notify service configured for assignee %s", task.assigned_to)
+            return False
+        
+        # Parse service name (format: "notify.service_name")
+        if not notify_service.startswith("notify."):
+            _LOGGER.warning("Invalid notify service format: %s", notify_service)
+            return False
+        
+        service_name = notify_service.replace("notify.", "")
+        
+        # Determine interruption level based on priority
+        interruption_level = self._get_interruption_level(task.priority)
+        
+        # Build notification title
+        title = f"{task.name} · Past Due"
+        if is_reminder:
+            title = f"Reminder: {title}"
+        
+        # Build notification data
+        data = {
+            "title": title,
+            "message": "Your task is past due. Please complete it or edit its due date to stop receiving notifications.",
+            "data": {
+                "url": "/at-a-glance/chores",
+                "clickAction": "/at-a-glance/chores",
+                "push": {
+                    "sound": "default",
+                    "interruption-level": interruption_level,
+                },
+            },
+        }
+        
+        try:
+            await self._hass.services.async_call(
+                "notify",
+                service_name,
+                data,
+                blocking=True,
+            )
+            _LOGGER.info(
+                "Sent %s notification for task '%s' (priority: %s, level: %s)",
+                "reminder" if is_reminder else "initial",
+                task.name,
+                task.priority,
+                interruption_level
+            )
+            return True
+        except Exception as e:
+            _LOGGER.error("Failed to send notification for task '%s': %s", task.name, e)
+            return False
+    
+    def schedule_reminder(
+        self,
+        task: DonetickTask,
+        reminder_time: datetime
+    ) -> Callable | None:
+        """Schedule a reminder notification for a task.
+        
+        Returns a cancel callback if scheduled successfully.
+        """
+        global _notification_reminders
+        
+        if not self.is_enabled():
+            return None
+        
+        # Check if reminder already scheduled
+        if task.id in _notification_reminders:
+            existing_cancel, existing_time = _notification_reminders[task.id]
+            # If same time, don't reschedule
+            if existing_time == reminder_time:
+                _LOGGER.debug("Reminder already scheduled for task %d at %s", task.id, reminder_time)
+                return existing_cancel
+            # Cancel existing and reschedule
+            existing_cancel()
+            del _notification_reminders[task.id]
+        
+        async def reminder_callback(now: datetime) -> None:
+            """Handle reminder callback."""
+            global _notification_reminders
+            
+            # Remove from tracking
+            if task.id in _notification_reminders:
+                del _notification_reminders[task.id]
+            
+            # Check if task is still past due and exists
+            coordinator = self._hass.data.get(DOMAIN, {}).get(
+                self._config_entry.entry_id, {}
+            ).get("coordinator")
+            
+            if coordinator and coordinator.data:
+                current_task = coordinator.data.get(task.id)
+                if current_task and current_task.is_active:
+                    # Task still exists and is active - send reminder
+                    await self.send_past_due_notification(current_task, is_reminder=True)
+                    
+                    # Schedule next reminder
+                    next_reminder = now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
+                    self.schedule_reminder(current_task, next_reminder)
+                else:
+                    _LOGGER.debug("Task %d no longer active, skipping reminder", task.id)
+        
+        cancel = async_track_point_in_time(
+            self._hass,
+            reminder_callback,
+            reminder_time
+        )
+        
+        _notification_reminders[task.id] = (cancel, reminder_time)
+        _LOGGER.debug(
+            "Scheduled reminder for task '%s' (ID: %d) at %s",
+            task.name, task.id, reminder_time.isoformat()
+        )
+        
+        return cancel
+    
+    @staticmethod
+    def cancel_reminder(task_id: int) -> None:
+        """Cancel a scheduled reminder for a task."""
+        global _notification_reminders
+        
+        if task_id in _notification_reminders:
+            cancel, _ = _notification_reminders[task_id]
+            cancel()
+            del _notification_reminders[task_id]
+            _LOGGER.debug("Cancelled reminder for task %d", task_id)
 
 
 class DonetickTaskCoordinator(DataUpdateCoordinator):
@@ -515,7 +694,9 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         self._list_type = list_type
         self._member = member
         self._cached_task_ids: set[int] = set()  # Track which task IDs are in this list
-        self._scheduled_transition_cancel: Optional[callable] = None  # Cancel callback for scheduled transition
+        self._scheduled_transition_cancel: Optional[Callable] = None  # Cancel callback for scheduled transition
+        self._notification_manager: Optional[NotificationManager] = None  # Will be set when hass available
+        self._notified_task_ids: set[int] = set()  # Track tasks we've already notified about
         
         list_type_name = self.LIST_TYPE_NAMES.get(list_type, list_type.replace("_", " ").title())
         
@@ -586,6 +767,13 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
     async def async_added_to_hass(self) -> None:
         """Handle entity being added to Home Assistant."""
         await super().async_added_to_hass()
+        
+        # Initialize notification manager for past_due lists
+        if self._list_type == "past_due":
+            self._notification_manager = NotificationManager(self.hass, self._config_entry)
+            # Check for any tasks already past due and send initial notifications
+            await self._check_and_notify_past_due_tasks()
+        
         # Schedule the first transition check
         self._schedule_next_transition()
 
@@ -596,6 +784,45 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         if self._scheduled_transition_cancel:
             self._scheduled_transition_cancel()
             self._scheduled_transition_cancel = None
+        
+        # Cancel any scheduled reminders for this entity's tasks
+        for task_id in list(self._notified_task_ids):
+            NotificationManager.cancel_reminder(task_id)
+
+    async def _check_and_notify_past_due_tasks(self) -> None:
+        """Check for past due tasks and send notifications for new ones."""
+        if self._list_type != "past_due" or not self._notification_manager:
+            return
+        
+        if not self._notification_manager.is_enabled():
+            return
+        
+        # Get current filtered tasks (past due tasks for this assignee)
+        filtered_tasks = self._filter_tasks(self.coordinator.tasks_list)
+        current_task_ids = {task.id for task in filtered_tasks}
+        
+        # Find newly past due tasks (not in our notified set)
+        new_past_due = current_task_ids - self._notified_task_ids
+        
+        # Find tasks no longer past due (completed/deleted/rescheduled)
+        resolved_tasks = self._notified_task_ids - current_task_ids
+        
+        # Cancel reminders for resolved tasks
+        for task_id in resolved_tasks:
+            NotificationManager.cancel_reminder(task_id)
+        
+        # Update our tracking set
+        self._notified_task_ids = current_task_ids.copy()
+        
+        # Send notifications for newly past due tasks
+        for task in filtered_tasks:
+            if task.id in new_past_due:
+                sent = await self._notification_manager.send_past_due_notification(task)
+                if sent:
+                    # Schedule reminder for 24 hours from now
+                    local_now = self._get_local_now()
+                    reminder_time = local_now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
+                    self._notification_manager.schedule_reminder(task, reminder_time)
 
     def _schedule_next_transition(self) -> None:
         """Schedule a state update at the next task transition time.
@@ -633,6 +860,10 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
     async def _handle_transition_callback(self, now: datetime) -> None:
         """Handle the scheduled transition callback."""
         _LOGGER.debug("%s: Transition callback fired at %s", self._attr_name, now.isoformat())
+        
+        # For past_due lists, check for new past due tasks and send notifications
+        if self._list_type == "past_due":
+            await self._check_and_notify_past_due_tasks()
         
         # Trigger a state update - this will cause todo_items to be re-evaluated
         self.async_write_ha_state()

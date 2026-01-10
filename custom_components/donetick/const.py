@@ -58,3 +58,16 @@ EVENT_DONETICK_TASK_SKIPPED = f"{DOMAIN}_task_skipped"
 EVENT_DONETICK_TASK_REMINDER = f"{DOMAIN}_task_reminder"
 EVENT_DONETICK_SUBTASK_COMPLETED = f"{DOMAIN}_subtask_completed"
 EVENT_DONETICK_THING_CHANGED = f"{DOMAIN}_thing_changed"
+
+# Notification configuration
+CONF_NOTIFY_ON_PAST_DUE = "notify_on_past_due"
+CONF_ASSIGNEE_NOTIFICATIONS = "assignee_notifications"  # Dict mapping user_id -> notify service
+
+# Notification reminder interval (24 hours)
+NOTIFICATION_REMINDER_INTERVAL = 86400  # seconds
+
+# Priority levels for interruption mapping
+PRIORITY_P1 = 1  # critical
+PRIORITY_P2 = 2  # time-sensitive
+PRIORITY_P3 = 3  # normal
+PRIORITY_P4 = 4  # normal
