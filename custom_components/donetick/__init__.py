@@ -4,7 +4,7 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import (
     DOMAIN,
@@ -227,7 +227,7 @@ async def async_complete_task_service(hass: HomeAssistant, call: ServiceCall) ->
         
         # If not found, check if it's an entity ID and extract config entry from it
         if not entry and config_entry_id.startswith("todo."):
-            entity_registry = hass.helpers.entity_registry.async_get()
+            entity_registry = er.async_get(hass)
             entity_entry = entity_registry.async_get(config_entry_id)
             if entity_entry:
                 entry = hass.config_entries.async_get_entry(entity_entry.config_entry_id)
@@ -251,13 +251,15 @@ async def async_complete_task_service(hass: HomeAssistant, call: ServiceCall) ->
         _LOGGER.info("Task %d completed successfully by user %s", task_id, completed_by or "default")
         
         # Trigger coordinator refresh for all todo entities
-        entity_registry = hass.helpers.entity_registry.async_get()
+        entity_registry = er.async_get(hass)
         for entity_id in hass.states.async_entity_ids("todo"):
             if entity_id.startswith("todo.dt_"):
                 entity_entry = entity_registry.async_get(entity_id)
                 if entity_entry and entity_entry.config_entry_id == entry.entry_id:
-                    # Trigger update - this will refresh the coordinator
-                    await hass.helpers.entity_component.async_update_entity(entity_id)
+                    # Trigger update by requesting state update
+                    await hass.services.async_call(
+                        "homeassistant", "update_entity", {"entity_id": entity_id}
+                    )
                     
     except Exception as e:
         _LOGGER.error("Failed to complete task %d: %s", task_id, e)
@@ -618,7 +620,7 @@ async def _get_config_entry(hass: HomeAssistant, config_entry_id: str = None) ->
         
         # If not found, check if it's an entity ID and extract config entry from it
         if not entry and config_entry_id.startswith("todo."):
-            entity_registry = hass.helpers.entity_registry.async_get()
+            entity_registry = er.async_get(hass)
             entity_entry = entity_registry.async_get(config_entry_id)
             if entity_entry:
                 entry = hass.config_entries.async_get_entry(entity_entry.config_entry_id)
@@ -638,13 +640,15 @@ async def _get_config_entry(hass: HomeAssistant, config_entry_id: str = None) ->
 
 async def _refresh_todo_entities(hass: HomeAssistant, config_entry_id: str) -> None:
     """Refresh all todo entities for the given config entry."""
-    entity_registry = hass.helpers.entity_registry.async_get()
+    entity_registry = er.async_get(hass)
     for entity_id in hass.states.async_entity_ids("todo"):
         if entity_id.startswith("todo.dt_"):
             entity_entry = entity_registry.async_get(entity_id)
             if entity_entry and entity_entry.config_entry_id == config_entry_id:
-                # Trigger update - this will refresh the coordinator
-                await hass.helpers.entity_component.async_update_entity(entity_id)
+                # Trigger update by requesting state update
+                await hass.services.async_call(
+                    "homeassistant", "update_entity", {"entity_id": entity_id}
+                )
 
 
 def _get_api_client(hass: HomeAssistant, entry_id: str) -> DonetickApiClient:
