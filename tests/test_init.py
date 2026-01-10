@@ -215,7 +215,7 @@ class TestAsyncSetupEntry:
         assert mock_config_entry.entry_id in mock_hass.data[DOMAIN]
         
         # Check services were registered
-        assert mock_hass.services.async_register.call_count == 4
+        assert mock_hass.services.async_register.call_count == 5
 
     @pytest.mark.asyncio
     async def test_setup_entry_generates_webhook_id(self, mock_hass, mock_config_entry):
@@ -304,8 +304,8 @@ class TestAsyncUnloadEntry:
         with patch('custom_components.donetick.async_unregister_webhook', new_callable=AsyncMock):
             await async_unload_entry(mock_hass, mock_config_entry)
         
-        # Check services were removed (4 services)
-        assert mock_hass.services.async_remove.call_count == 4
+        # Check services were removed (5 services)
+        assert mock_hass.services.async_remove.call_count == 5
 
 
 class TestGetApiClient:
