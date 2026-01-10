@@ -69,10 +69,13 @@ def sample_task_p1():
         name="Critical Task",
         description="This is urgent",
         frequency_type="once",
+        frequency=1,
         next_due_date=datetime.now(ZoneInfo("UTC")) - timedelta(hours=1),
         assigned_to=1,
         is_active=True,
         priority=PRIORITY_P1,
+        status=0,
+        labels=None,
     )
 
 
@@ -84,10 +87,13 @@ def sample_task_p2():
         name="Important Task",
         description="Time sensitive",
         frequency_type="once",
+        frequency=1,
         next_due_date=datetime.now(ZoneInfo("UTC")) - timedelta(hours=2),
         assigned_to=2,
         is_active=True,
         priority=PRIORITY_P2,
+        status=0,
+        labels=None,
     )
 
 
@@ -99,10 +105,13 @@ def sample_task_p3():
         name="Normal Task",
         description="Regular priority",
         frequency_type="once",
+        frequency=1,
         next_due_date=datetime.now(ZoneInfo("UTC")) - timedelta(hours=3),
         assigned_to=1,
         is_active=True,
         priority=PRIORITY_P3,
+        status=0,
+        labels=None,
     )
 
 
@@ -114,10 +123,13 @@ def sample_task_no_assignee():
         name="Unassigned Task",
         description="No one assigned",
         frequency_type="once",
+        frequency=1,
         next_due_date=datetime.now(ZoneInfo("UTC")) - timedelta(hours=1),
         assigned_to=None,
         is_active=True,
         priority=PRIORITY_P3,
+        status=0,
+        labels=None,
     )
 
 
