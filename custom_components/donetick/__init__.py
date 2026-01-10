@@ -639,16 +639,16 @@ async def _get_config_entry(hass: HomeAssistant, config_entry_id: str = None) ->
     return entry
 
 async def _refresh_todo_entities(hass: HomeAssistant, config_entry_id: str) -> None:
-    """Refresh all todo entities for the given config entry."""
-    entity_registry = er.async_get(hass)
-    for entity_id in hass.states.async_entity_ids("todo"):
-        if entity_id.startswith("todo.dt_"):
-            entity_entry = entity_registry.async_get(entity_id)
-            if entity_entry and entity_entry.config_entry_id == config_entry_id:
-                # Trigger update by requesting state update
-                await hass.services.async_call(
-                    "homeassistant", "update_entity", {"entity_id": entity_id}
-                )
+    """Refresh all todo entities for the given config entry by triggering a coordinator refresh."""
+    try:
+        coordinator = hass.data[DOMAIN][config_entry_id].get("coordinator")
+        if coordinator:
+            await coordinator.async_request_refresh()
+            _LOGGER.debug("Triggered coordinator refresh for config entry %s", config_entry_id)
+        else:
+            _LOGGER.warning("No coordinator found for config entry %s", config_entry_id)
+    except KeyError:
+        _LOGGER.warning("Config entry %s not found in hass.data", config_entry_id)
 
 
 def _get_api_client(hass: HomeAssistant, entry_id: str) -> DonetickApiClient:
