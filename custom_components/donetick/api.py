@@ -477,7 +477,10 @@ class DonetickApiClient:
                 payload["labelsV2"] = [{"id": lid} for lid in labels]
             if notification is not None:
                 payload["notification"] = notification
-            if notification_metadata:
+                # Always include notificationMetadata when notification is set
+                # to avoid nil pointer crash in Donetick's notification planner
+                payload["notificationMetadata"] = notification_metadata or {}
+            elif notification_metadata:
                 payload["notificationMetadata"] = notification_metadata
             if is_rolling is not None:
                 payload["isRolling"] = is_rolling
