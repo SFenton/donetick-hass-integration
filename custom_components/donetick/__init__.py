@@ -207,6 +207,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                   DOMAIN, SERVICE_UPDATE_TASK, DOMAIN, SERVICE_DELETE_TASK,
                   DOMAIN, SERVICE_CREATE_TASK_FORM)
     
+    # Register event listener for notification actions
+    async def handle_notification_action(event):
+        """Handle notification action button presses."""
+        await async_handle_notification_action(hass, event, entry)
+    
+    # Store the unsubscribe function so we can clean up on unload
+    unsubscribe = hass.bus.async_listen(
+        "mobile_app_notification_action",
+        handle_notification_action
+    )
+    hass.data[DOMAIN][entry.entry_id]["notification_action_unsub"] = unsubscribe
+    
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     entry.add_update_listener(async_reload_entry)
@@ -651,6 +663,100 @@ async def _refresh_todo_entities(hass: HomeAssistant, config_entry_id: str) -> N
         _LOGGER.warning("Config entry %s not found in hass.data", config_entry_id)
 
 
+async def async_handle_notification_action(hass: HomeAssistant, event, entry: ConfigEntry) -> None:
+    """Handle notification action button presses from mobile app.
+    
+    Actions are formatted as:
+    - DONETICK_COMPLETE_{task_id}
+    - DONETICK_SNOOZE_1H_{task_id}
+    - DONETICK_SNOOZE_1D_{task_id}
+    """
+    action = event.data.get("action", "")
+    
+    # Check if this is a Donetick action
+    if not action.startswith("DONETICK_"):
+        return
+    
+    _LOGGER.debug("Received notification action: %s", action)
+    
+    try:
+        # Parse the action to extract type and task_id
+        parts = action.split("_")
+        if len(parts) < 3:
+            _LOGGER.warning("Invalid Donetick action format: %s", action)
+            return
+        
+        # Extract task_id (last part)
+        task_id = int(parts[-1])
+        
+        # Determine action type
+        if action.startswith("DONETICK_COMPLETE_"):
+            await _handle_complete_action(hass, entry, task_id)
+        elif action.startswith("DONETICK_SNOOZE_1H_"):
+            await _handle_snooze_action(hass, entry, task_id, hours=1)
+        elif action.startswith("DONETICK_SNOOZE_1D_"):
+            await _handle_snooze_action(hass, entry, task_id, hours=24)
+        else:
+            _LOGGER.warning("Unknown Donetick action type: %s", action)
+    
+    except ValueError as e:
+        _LOGGER.error("Failed to parse task_id from action %s: %s", action, e)
+    except Exception as e:
+        _LOGGER.error("Error handling notification action %s: %s", action, e)
+
+
+async def _handle_complete_action(hass: HomeAssistant, entry: ConfigEntry, task_id: int) -> None:
+    """Handle the complete action from notification."""
+    _LOGGER.info("Completing task %d from notification action", task_id)
+    
+    client = _get_api_client(hass, entry.entry_id)
+    
+    try:
+        await client.async_complete_task(task_id)
+        _LOGGER.info("Task %d completed via notification action", task_id)
+        
+        # Trigger coordinator refresh
+        await _refresh_todo_entities(hass, entry.entry_id)
+        
+        # Dismiss the notification by sending a clear command
+        # (The tag allows us to target the specific notification)
+        _LOGGER.debug("Task %d completed, notification should auto-dismiss", task_id)
+        
+    except Exception as e:
+        _LOGGER.error("Failed to complete task %d: %s", task_id, e)
+
+
+async def _handle_snooze_action(hass: HomeAssistant, entry: ConfigEntry, task_id: int, hours: int) -> None:
+    """Handle the snooze action from notification.
+    
+    Snoozing updates the task's due date to now + hours.
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    
+    _LOGGER.info("Snoozing task %d for %d hours from notification action", task_id, hours)
+    
+    client = _get_api_client(hass, entry.entry_id)
+    
+    try:
+        # Calculate new due date (now + hours in local timezone)
+        tz = ZoneInfo(hass.config.time_zone)
+        new_due_date = datetime.now(tz) + timedelta(hours=hours)
+        
+        # Update the task with new due date
+        await client.async_update_task(
+            task_id=task_id,
+            due_date=new_due_date.isoformat()
+        )
+        _LOGGER.info("Task %d snoozed to %s via notification action", task_id, new_due_date.isoformat())
+        
+        # Trigger coordinator refresh
+        await _refresh_todo_entities(hass, entry.entry_id)
+        
+    except Exception as e:
+        _LOGGER.error("Failed to snooze task %d: %s", task_id, e)
+
+
 def _get_api_client(hass: HomeAssistant, entry_id: str) -> DonetickApiClient:
     """Create an API client for the given config entry."""
     session = async_get_clientsession(hass)
@@ -680,6 +786,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     webhook_id = entry.data.get(CONF_WEBHOOK_ID)
     if webhook_id:
         await async_unregister_webhook(hass, webhook_id)
+    
+    # Unsubscribe from notification action events
+    if entry.entry_id in hass.data.get(DOMAIN, {}):
+        unsub = hass.data[DOMAIN][entry.entry_id].get("notification_action_unsub")
+        if unsub:
+            unsub()
     
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:

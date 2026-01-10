@@ -114,17 +114,33 @@ class NotificationManager:
         if is_reminder:
             title = f"Reminder: {title}"
         
-        # Build notification data
+        # Build notification data with actionable buttons
         data = {
             "title": title,
             "message": "Your task is past due. Please complete it or edit its due date to stop receiving notifications.",
             "data": {
                 "url": "/at-a-glance/chores",
                 "clickAction": "/at-a-glance/chores",
+                "tag": f"donetick_task_{task.id}",  # Allows replacing/dismissing notification
                 "push": {
                     "sound": "default",
                     "interruption-level": interruption_level,
                 },
+                # Action buttons for iOS/Android companion app
+                "actions": [
+                    {
+                        "action": f"DONETICK_COMPLETE_{task.id}",
+                        "title": "Complete",
+                    },
+                    {
+                        "action": f"DONETICK_SNOOZE_1H_{task.id}",
+                        "title": "Snooze 1 Hour",
+                    },
+                    {
+                        "action": f"DONETICK_SNOOZE_1D_{task.id}",
+                        "title": "Snooze 1 Day",
+                    },
+                ],
             },
         }
         
