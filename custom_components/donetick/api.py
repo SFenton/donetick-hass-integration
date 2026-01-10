@@ -497,11 +497,28 @@ class DonetickApiClient:
         
         data = await self._request("POST", endpoint, json_data=payload)
         
+        _LOGGER.debug("Create task raw response type: %s, value: %s", type(data).__name__, data)
+        
         # Handle wrapped response (API may return {"res": {...}})
         if isinstance(data, dict) and "res" in data:
             data = data["res"]
+            _LOGGER.debug("Unwrapped 'res': %s", data)
         
-        _LOGGER.debug("Create task response: %s", data)
+        # Handle case where API returns just the ID
+        if isinstance(data, int):
+            _LOGGER.debug("API returned task ID only: %d, fetching full task", data)
+            # Fetch the full task data
+            tasks = await self.async_get_tasks()
+            for task in tasks:
+                if task.id == data:
+                    return task
+            # If we can't find it, create a minimal task object
+            return DonetickTask(id=data, name=name, next_due_date=None, status=0, priority=0)
+        
+        if not isinstance(data, dict):
+            _LOGGER.error("Unexpected create task response type: %s, value: %s", type(data).__name__, data)
+            raise ValueError(f"Unexpected API response: {data}")
+        
         return DonetickTask.from_json(data)
 
     async def async_update_task(
