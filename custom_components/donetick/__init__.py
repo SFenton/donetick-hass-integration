@@ -97,7 +97,7 @@ CREATE_TASK_FORM_SCHEMA = vol.Schema({
     vol.Required("name"): vol.All(cv.string, vol.Length(min=1)),
     vol.Optional("description"): cv.string,
     vol.Optional("due_date"): cv.string,  # Will accept datetime from UI
-    vol.Optional("priority", default="none"): vol.In(["none", "low", "medium", "high"]),
+    vol.Optional("priority", default="none"): vol.In(["none", "low", "medium", "high", "critical"]),
     vol.Optional("recurrence", default="no_repeat"): vol.In([
         "no_repeat", "once", "daily", "weekly", "monthly", "yearly", 
         "interval", "days_of_the_week", "adaptive"
@@ -423,8 +423,8 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
     due_date_raw = call.data.get("due_date")
     config_entry_id = call.data.get("config_entry_id")
     
-    # Map user-friendly priority to API priority (0-3)
-    priority_map = {"none": 0, "low": 1, "medium": 2, "high": 3}
+    # Map user-friendly priority to API priority (0-4)
+    priority_map = {"none": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
     priority_str = call.data.get("priority", "none")
     priority = priority_map.get(priority_str, 0)
     
