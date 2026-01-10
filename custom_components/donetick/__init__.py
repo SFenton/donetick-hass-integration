@@ -456,19 +456,61 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
         if isinstance(due_date_raw, str):
             # Strip whitespace that may come from Jinja templates
             due_date = due_date_raw.strip()
-            # If it's just a date or datetime without timezone, add Z suffix
-            if due_date and 'T' in due_date and not (due_date.endswith('Z') or '+' in due_date or due_date.count(':') >= 2 and '-' in due_date[-6:]):
-                due_date = due_date + "Z"
-            _LOGGER.debug("Processed due_date string: %r", due_date)
+            # If it already has timezone info, use as-is
+            if due_date and (due_date.endswith('Z') or '+' in due_date[-6:]):
+                _LOGGER.debug("Due date already has timezone: %r", due_date)
+            elif due_date and 'T' in due_date:
+                # No timezone - treat as local time and convert to UTC
+                try:
+                    from datetime import datetime
+                    import zoneinfo
+                    # Parse as naive datetime
+                    naive_dt = datetime.fromisoformat(due_date)
+                    # Get Home Assistant's timezone
+                    local_tz = zoneinfo.ZoneInfo(hass.config.time_zone)
+                    # Localize to HA timezone
+                    local_dt = naive_dt.replace(tzinfo=local_tz)
+                    # Convert to UTC and format as RFC3339
+                    utc_dt = local_dt.astimezone(zoneinfo.ZoneInfo("UTC"))
+                    due_date = utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    _LOGGER.debug("Converted local time %s to UTC: %r", naive_dt, due_date)
+                except Exception as e:
+                    _LOGGER.warning("Could not convert due date timezone: %s, using as-is with Z suffix", e)
+                    due_date = due_date + "Z"
+            elif due_date:
+                # Just a date without time - add noon local time
+                try:
+                    from datetime import datetime
+                    import zoneinfo
+                    naive_dt = datetime.fromisoformat(due_date + "T12:00:00")
+                    local_tz = zoneinfo.ZoneInfo(hass.config.time_zone)
+                    local_dt = naive_dt.replace(tzinfo=local_tz)
+                    utc_dt = local_dt.astimezone(zoneinfo.ZoneInfo("UTC"))
+                    due_date = utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    _LOGGER.debug("Converted date-only to UTC noon: %r", due_date)
+                except Exception as e:
+                    _LOGGER.warning("Could not convert date-only timezone: %s", e)
+                    due_date = due_date + "T12:00:00Z"
         else:
             # Convert datetime object to RFC3339 format
             try:
                 from datetime import datetime
+                import zoneinfo
                 if hasattr(due_date_raw, 'isoformat'):
-                    due_date = due_date_raw.isoformat() + "Z"
+                    # Check if it has timezone info
+                    if hasattr(due_date_raw, 'tzinfo') and due_date_raw.tzinfo is not None:
+                        # Already timezone-aware, convert to UTC
+                        utc_dt = due_date_raw.astimezone(zoneinfo.ZoneInfo("UTC"))
+                        due_date = utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    else:
+                        # Naive datetime - assume local time
+                        local_tz = zoneinfo.ZoneInfo(hass.config.time_zone)
+                        local_dt = due_date_raw.replace(tzinfo=local_tz)
+                        utc_dt = local_dt.astimezone(zoneinfo.ZoneInfo("UTC"))
+                        due_date = utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    _LOGGER.debug("Converted datetime object to UTC: %r", due_date)
                 else:
                     due_date = str(due_date_raw)
-                _LOGGER.debug("Converted due_date from object: %r", due_date)
             except Exception as e:
                 _LOGGER.warning("Could not parse due date: %s", e)
     
