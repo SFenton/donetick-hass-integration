@@ -513,6 +513,7 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         super().__init__(coordinator, config_entry, hass)
         self._list_type = list_type
         self._member = member
+        self._cached_task_ids: set[int] = set()  # Track which task IDs are in this list
         
         list_type_name = self.LIST_TYPE_NAMES.get(list_type, list_type.replace("_", " ").title())
         
@@ -525,20 +526,55 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
 
     @property
     def todo_items(self) -> list[TodoItem] | None:
-        """Return todo items with time-aware cache invalidation."""
+        """Return todo items with content-based cache invalidation.
+        
+        Only rebuilds (triggers UI update) when:
+        1. Server data version changed (task added/removed/updated)
+        2. Tasks have migrated between lists due to time passing
+        """
         if self.coordinator.data is None:
             return None
         
-        # Cache key includes data version + current minute for time-sensitive filtering
-        # This limits rebuilds to at most once per minute while still catching time transitions
-        local_now = self._get_local_now()
-        current_minute = local_now.replace(second=0, microsecond=0)
-        current_version = self.coordinator.data_version
-        cache_key = (current_version, current_minute)
+        # First check: has server data changed?
+        server_changed = self._cached_data_version != self.coordinator.data_version
         
-        if not hasattr(self, '_time_cache_key') or self._time_cache_key != cache_key:
-            self._cached_todo_items = self._build_todo_items()
-            self._time_cache_key = cache_key
+        # Get current filtered tasks
+        filtered_tasks = self._filter_tasks(self.coordinator.tasks_list)
+        current_task_ids = {task.id for task in filtered_tasks}
+        
+        # Second check: have tasks migrated in/out due to time?
+        time_migration = current_task_ids != self._cached_task_ids
+        
+        if server_changed or time_migration:
+            # Build new todo items
+            self._cached_todo_items = [
+                TodoItem(
+                    summary=task.name,
+                    uid="%s--%s" % (task.id, task.next_due_date),
+                    status=self.get_status(task.next_due_date, task.is_active),
+                    due=task.next_due_date,
+                    description=task.description or ""
+                ) for task in filtered_tasks if task.is_active
+            ]
+            
+            # Update caches
+            old_task_ids = self._cached_task_ids
+            self._cached_task_ids = current_task_ids
+            self._cached_data_version = self.coordinator.data_version
+            
+            # Log what changed
+            if time_migration and not server_changed:
+                added = current_task_ids - old_task_ids
+                removed = old_task_ids - current_task_ids
+                _LOGGER.debug(
+                    "%s: Time-based migration - added %d tasks, removed %d tasks",
+                    self._attr_name, len(added), len(removed)
+                )
+            elif server_changed:
+                _LOGGER.debug(
+                    "%s: Rebuilt due to server changes (version %d, %d items)",
+                    self._attr_name, self.coordinator.data_version, len(self._cached_todo_items)
+                )
         
         return self._cached_todo_items
 

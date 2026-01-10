@@ -394,3 +394,154 @@ class TestDonetickDateFilteredTasksList:
         entity = DonetickDateFilteredTasksList(mock_coordinator, mock_config_entry, mock_hass, "due_today")
         
         assert "Due Today" in entity.name
+
+    def test_time_migration_upcoming_to_due_today(self, mock_config_entry, mock_hass):
+        """Test task migrates from upcoming to due_today when time passes."""
+        # Create a task due tomorrow
+        tomorrow = datetime.now(ZoneInfo("America/New_York")) + timedelta(days=1)
+        task_data = {
+            "id": 1,
+            "name": "Test Task",
+            "frequencyType": "once",
+            "nextDueDate": tomorrow.isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        # Create upcoming entity
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "upcoming")
+        
+        # Initially, task should be in upcoming
+        items = entity.todo_items
+        assert len(items) == 1
+        assert entity._cached_task_ids == {1}
+        
+        # Simulate time passing - task now due today
+        today = datetime.now(ZoneInfo("America/New_York")).replace(hour=14, minute=0, second=0)
+        task_data["nextDueDate"] = today.isoformat()
+        task = DonetickTask.from_json(task_data)
+        coordinator.tasks_list = [task]
+        coordinator.data = {1: task}
+        # Note: data_version doesn't change - server didn't change, only time passed
+        
+        # Now check upcoming - task should have migrated out
+        items = entity.todo_items
+        assert len(items) == 0
+        assert entity._cached_task_ids == set()
+        
+    def test_time_migration_due_today_to_past_due(self, mock_config_entry, mock_hass):
+        """Test task migrates from due_today to past_due when time passes."""
+        # Create a task due in 1 hour
+        now = datetime.now(ZoneInfo("America/New_York"))
+        due_soon = now + timedelta(hours=1)
+        task_data = {
+            "id": 1,
+            "name": "Test Task",
+            "frequencyType": "once",
+            "nextDueDate": due_soon.isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        # Create due_today entity
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "due_today")
+        
+        # Initially, task should be in due_today
+        items = entity.todo_items
+        assert len(items) == 1
+        
+        # Simulate time passing - task now past due
+        past = now - timedelta(hours=1)
+        task_data["nextDueDate"] = past.isoformat()
+        task = DonetickTask.from_json(task_data)
+        coordinator.tasks_list = [task]
+        coordinator.data = {1: task}
+        
+        # Now check due_today - task should have migrated out
+        items = entity.todo_items
+        assert len(items) == 0
+
+    def test_no_rebuild_when_no_changes(self, mock_config_entry, mock_hass):
+        """Test that todo_items cache is used when nothing changed."""
+        tomorrow = datetime.now(ZoneInfo("America/New_York")) + timedelta(days=1)
+        task_data = {
+            "id": 1,
+            "name": "Test Task",
+            "frequencyType": "once",
+            "nextDueDate": tomorrow.isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "upcoming")
+        
+        # First access - builds cache
+        items1 = entity.todo_items
+        
+        # Second access - same data, same time window - should return same object
+        items2 = entity.todo_items
+        
+        # Should be the exact same list object (cached)
+        assert items1 is items2
+
+    def test_server_change_triggers_rebuild(self, mock_config_entry, mock_hass):
+        """Test that server data changes trigger a rebuild."""
+        tomorrow = datetime.now(ZoneInfo("America/New_York")) + timedelta(days=1)
+        task_data = {
+            "id": 1,
+            "name": "Test Task",
+            "frequencyType": "once",
+            "nextDueDate": tomorrow.isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "upcoming")
+        
+        # First access
+        items1 = entity.todo_items
+        
+        # Server data changes (new task added)
+        task2_data = {
+            "id": 2,
+            "name": "New Task",
+            "frequencyType": "once",
+            "nextDueDate": (tomorrow + timedelta(days=1)).isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task2 = DonetickTask.from_json(task2_data)
+        coordinator.tasks_list = [task, task2]
+        coordinator.data = {1: task, 2: task2}
+        coordinator.data_version = 2  # Version incremented
+        
+        # Second access - should rebuild due to version change
+        items2 = entity.todo_items
+        
+        # Should be a new list with 2 items
+        assert items1 is not items2
+        assert len(items2) == 2
