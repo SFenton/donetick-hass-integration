@@ -467,6 +467,9 @@ class DonetickApiClient:
                 payload["frequencyMetadata"] = frequency_metadata
             if assignees:
                 payload["assignees"] = [{"userId": uid} for uid in assignees]
+                # Also set assignedTo to the first assignee if not explicitly set
+                if assigned_to is None:
+                    payload["assignedTo"] = assignees[0]
             if assigned_to is not None:
                 payload["assignedTo"] = assigned_to
             if priority is not None:
