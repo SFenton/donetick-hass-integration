@@ -429,8 +429,37 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
     
     # Get interval for custom recurrence
     frequency = None
+    frequency_metadata = None
     if recurrence == "interval":
         frequency = call.data.get("recurrence_interval", 1)
+    
+    # Build frequency_metadata with timezone info for recurring tasks
+    # This is required by Donetick for proper next-due-date calculation
+    if recurrence != "no_repeat" and recurrence != "once":
+        from datetime import datetime
+        import zoneinfo
+        local_tz = zoneinfo.ZoneInfo(hass.config.time_zone)
+        now_local = datetime.now(local_tz)
+        
+        # Determine unit for frequencyMetadata
+        unit_map = {
+            "daily": "days",
+            "weekly": "weeks", 
+            "monthly": "months",
+            "yearly": "years",
+            "interval": "days",  # Default to days for interval
+        }
+        unit = unit_map.get(recurrence, "days")
+        
+        frequency_metadata = {
+            "timezone": hass.config.time_zone,
+            "time": now_local.isoformat(),
+            "unit": unit,
+        }
+        
+        # Set default frequency for non-interval types
+        if frequency is None:
+            frequency = 1
     
     # Parse assignees from comma-separated string to list of ints
     assignees_str = call.data.get("assignees")
@@ -523,8 +552,8 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
     client = _get_api_client(hass, entry.entry_id)
     
     _LOGGER.debug(
-        "Creating task via form - name: %r, due_date: %r, priority: %r, frequency_type: %r",
-        name, due_date, priority, frequency_type
+        "Creating task via form - name: %r, due_date: %r, priority: %r, frequency_type: %r, frequency_metadata: %r",
+        name, due_date, priority, frequency_type, frequency_metadata
     )
     
     try:
@@ -535,6 +564,7 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
             priority=priority,
             frequency_type=frequency_type,
             frequency=frequency,
+            frequency_metadata=frequency_metadata,
             assignees=assignees,
             assign_strategy=assign_strategy if assignees else None,
             points=points,
