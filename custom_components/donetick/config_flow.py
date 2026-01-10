@@ -275,32 +275,31 @@ class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema_dict = {}
         
         # Get available notify services
-        notify_services = []
+        notify_services = [{"value": "", "label": "(None)"}]
         for service in self.hass.services.async_services().get("notify", {}):
             notify_services.append({"value": f"notify.{service}", "label": f"notify.{service}"})
         
-        if not notify_services:
-            notify_services = [{"value": "", "label": "No notify services found"}]
+        # Build data descriptions with member names as labels
+        data_descriptions = {}
         
         for member in self._circle_members:
             if member.is_active:
-                schema_dict[vol.Optional(f"notify_{member.user_id}")] = SelectSelector(
+                key = f"notify_{member.user_id}"
+                schema_dict[vol.Optional(key)] = SelectSelector(
                     SelectSelectorConfig(
                         options=notify_services,
                         mode=SelectSelectorMode.DROPDOWN,
                     )
                 )
-        
-        # Build description placeholders for member names
-        member_descriptions = {
-            f"member_{m.user_id}": m.display_name 
-            for m in self._circle_members if m.is_active
-        }
+                data_descriptions[key] = f"Notify service for {member.display_name}"
 
         return self.async_show_form(
             step_id="notifications",
             data_schema=vol.Schema(schema_dict),
-            description_placeholders=member_descriptions,
+            description_placeholders={
+                "members": ", ".join(m.display_name for m in self._circle_members if m.is_active)
+            },
+            data_description=data_descriptions,
         )
 
     @staticmethod
@@ -481,17 +480,26 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
         # Get existing mappings
         existing_mappings = self.entry.data.get(CONF_ASSIGNEE_NOTIFICATIONS, {})
         
+        # Build data descriptions with member names as labels
+        data_descriptions = {}
+        
         for member in self._circle_members:
             if member.is_active:
+                key = f"notify_{member.user_id}"
                 default_value = existing_mappings.get(str(member.user_id), "")
-                schema_dict[vol.Optional(f"notify_{member.user_id}", default=default_value)] = SelectSelector(
+                schema_dict[vol.Optional(key, default=default_value)] = SelectSelector(
                     SelectSelectorConfig(
                         options=notify_services,
                         mode=SelectSelectorMode.DROPDOWN,
                     )
                 )
+                data_descriptions[key] = f"Notify service for {member.display_name}"
 
         return self.async_show_form(
             step_id="notifications",
             data_schema=vol.Schema(schema_dict),
+            description_placeholders={
+                "members": ", ".join(m.display_name for m in self._circle_members if m.is_active)
+            },
+            data_description=data_descriptions,
         )
