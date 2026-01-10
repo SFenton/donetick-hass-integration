@@ -45,6 +45,7 @@ from .const import (
     CONF_UPCOMING_DAYS,
     DEFAULT_UPCOMING_DAYS,
     CONF_INCLUDE_UNASSIGNED,
+    FREQUENCY_DAILY,
 )
 from .api import DonetickApiClient
 from .model import DonetickTask, DonetickMember
@@ -1221,9 +1222,11 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
                     filtered.append(task)
             elif self._list_type == "upcoming":
                 # Upcoming: incomplete tasks with due date > end of today AND within upcoming_days
+                # Exclude daily recurring tasks - no action needed until they're due
                 if task_due > today_end and task_due <= upcoming_cutoff:
-                    filtered.append(task)
-            # no_due_date is handled separately below (doesn't need task_due)
+                    if task.frequency_type != FREQUENCY_DAILY:
+                        filtered.append(task)
+            # no_due_date is handled separately above (doesn't need task_due)
         
         return filtered
 
@@ -1311,8 +1314,10 @@ class DonetickDateFilteredWithUnassignedList(DonetickDateFilteredTasksList):
                 if today_start <= task_due <= today_end and task_due >= local_now:
                     filtered.append(task)
             elif self._list_type == "upcoming":
+                # Exclude daily recurring tasks - no action needed until they're due
                 if task_due > today_end and task_due <= upcoming_cutoff:
-                    filtered.append(task)
+                    if task.frequency_type != FREQUENCY_DAILY:
+                        filtered.append(task)
         
         return filtered
 
