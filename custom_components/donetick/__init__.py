@@ -106,7 +106,7 @@ CREATE_TASK_FORM_SCHEMA = vol.Schema({
     vol.Optional("recurrence_unit", default="days"): vol.In([
         "days", "weeks", "months", "years"
     ]),
-    vol.Optional("recurrence_days"): vol.Any(cv.ensure_list, None),  # List of day names
+    vol.Optional("recurrence_days", default=[]): cv.ensure_list,  # List of day names
     vol.Optional("assignees"): cv.string,  # Comma-separated user IDs
     vol.Optional("assign_strategy", default="random"): vol.In([
         "random", "least_assigned", "least_completed", 
