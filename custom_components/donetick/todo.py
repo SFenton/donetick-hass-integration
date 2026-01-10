@@ -13,7 +13,7 @@ from homeassistant.components.todo import (
     TodoListEntityFeature, 
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
@@ -804,6 +804,19 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         # Cancel any scheduled reminders for this entity's tasks
         for task_id in list(self._notified_task_ids):
             NotificationManager.cancel_reminder(task_id)
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        super()._handle_coordinator_update()
+        
+        # For past_due lists, also check for new past due tasks and send notifications
+        if self._list_type == "past_due" and self._notification_manager:
+            # Schedule the notification check to run asynchronously
+            self.hass.async_create_task(self._check_and_notify_past_due_tasks())
+        
+        # Reschedule transition since tasks may have changed
+        self._schedule_next_transition()
 
     async def _check_and_notify_past_due_tasks(self) -> None:
         """Check for past due tasks and send notifications for new ones."""
