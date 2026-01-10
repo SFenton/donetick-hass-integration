@@ -525,11 +525,22 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
 
     @property
     def todo_items(self) -> list[TodoItem] | None:
-        """Return todo items - always rebuild since filtering is time-sensitive."""
+        """Return todo items with time-aware cache invalidation."""
         if self.coordinator.data is None:
             return None
-        # Don't cache - time-based filtering needs fresh results every time
-        return self._build_todo_items()
+        
+        # Cache key includes data version + current minute for time-sensitive filtering
+        # This limits rebuilds to at most once per minute while still catching time transitions
+        local_now = self._get_local_now()
+        current_minute = local_now.replace(second=0, microsecond=0)
+        current_version = self.coordinator.data_version
+        cache_key = (current_version, current_minute)
+        
+        if not hasattr(self, '_time_cache_key') or self._time_cache_key != cache_key:
+            self._cached_todo_items = self._build_todo_items()
+            self._time_cache_key = cache_key
+        
+        return self._cached_todo_items
 
     def _filter_tasks(self, tasks):
         """Filter tasks based on date and assignee criteria."""
