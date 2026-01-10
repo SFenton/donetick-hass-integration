@@ -25,9 +25,10 @@ from custom_components.donetick.model import DonetickTask
 @pytest.fixture
 def mock_hass():
     """Create a mock Home Assistant instance."""
-    hass = MagicMock(spec=HomeAssistant)
+    hass = MagicMock()
     hass.services = MagicMock()
     hass.services.async_call = AsyncMock()
+    hass.config = MagicMock()
     hass.config.time_zone = "America/New_York"
     hass.data = {DOMAIN: {}}
     return hass
