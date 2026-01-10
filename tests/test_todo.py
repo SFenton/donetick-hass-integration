@@ -545,3 +545,414 @@ class TestDonetickDateFilteredTasksList:
         # Should be a new list with 2 items
         assert items1 is not items2
         assert len(items2) == 2
+
+
+class TestScheduledTransitions:
+    """Tests for scheduled transition timing in date-filtered lists."""
+
+    @pytest.fixture
+    def mock_hass(self):
+        """Create mock Home Assistant instance."""
+        hass = MagicMock()
+        hass.config = MagicMock()
+        hass.config.time_zone = "America/New_York"
+        hass.data = {DOMAIN: {"test_entry_id": {}}}
+        return hass
+
+    @pytest.fixture
+    def mock_config_entry(self):
+        """Create mock config entry."""
+        entry = MagicMock()
+        entry.entry_id = "test_entry_id"
+        entry.data = {
+            CONF_URL: "https://donetick.example.com",
+            CONF_AUTH_TYPE: AUTH_TYPE_JWT,
+            CONF_SHOW_DUE_IN: 7,
+        }
+        return entry
+
+    def test_calculate_transition_past_due_entry(self, mock_config_entry, mock_hass):
+        """Test calculation of when task enters past_due list."""
+        # Create a task due in 2 hours (currently in due_today)
+        now = datetime.now(ZoneInfo("America/New_York"))
+        due_time = now + timedelta(hours=2)
+        task_data = {
+            "id": 1,
+            "name": "Test Task",
+            "frequencyType": "once",
+            "nextDueDate": due_time.isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "past_due")
+        
+        # Calculate next transition
+        next_transition = entity._calculate_next_transition_time()
+        
+        # Should be approximately 2 hours from now (when task becomes past due)
+        assert next_transition is not None
+        # Allow 5 second buffer for test execution time
+        time_diff = (next_transition - due_time).total_seconds()
+        assert 0 <= time_diff <= 5  # 1 second buffer + tolerance
+
+    def test_calculate_transition_due_today_exit(self, mock_config_entry, mock_hass):
+        """Test calculation of when task exits due_today (becomes past_due)."""
+        now = datetime.now(ZoneInfo("America/New_York"))
+        due_time = now + timedelta(hours=3)
+        task_data = {
+            "id": 1,
+            "name": "Test Task",
+            "frequencyType": "once",
+            "nextDueDate": due_time.isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "due_today")
+        
+        next_transition = entity._calculate_next_transition_time()
+        
+        # Should be when task becomes past due (due_time)
+        assert next_transition is not None
+        time_diff = (next_transition - due_time).total_seconds()
+        assert 0 <= time_diff <= 5
+
+    def test_calculate_transition_upcoming_exit(self, mock_config_entry, mock_hass):
+        """Test calculation of when task exits upcoming (becomes due_today at midnight)."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime.now(tz)
+        
+        # Create a task due tomorrow at 2pm
+        tomorrow = now + timedelta(days=1)
+        tomorrow_2pm = tomorrow.replace(hour=14, minute=0, second=0, microsecond=0)
+        task_data = {
+            "id": 1,
+            "name": "Test Task",
+            "frequencyType": "once",
+            "nextDueDate": tomorrow_2pm.isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "upcoming")
+        
+        next_transition = entity._calculate_next_transition_time()
+        
+        # Should be at midnight tomorrow (start of tomorrow)
+        assert next_transition is not None
+        tomorrow_midnight = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
+        time_diff = (next_transition - tomorrow_midnight).total_seconds()
+        assert 0 <= time_diff <= 5
+
+    def test_calculate_transition_no_tasks(self, mock_config_entry, mock_hass):
+        """Test that no transition is scheduled when no relevant tasks exist."""
+        coordinator = MagicMock()
+        coordinator.data = {}
+        coordinator.data_version = 1
+        coordinator.tasks_list = []
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "past_due")
+        
+        next_transition = entity._calculate_next_transition_time()
+        
+        assert next_transition is None
+
+    def test_calculate_transition_multiple_tasks_picks_earliest(self, mock_config_entry, mock_hass):
+        """Test that the earliest transition time is chosen when multiple tasks exist."""
+        now = datetime.now(ZoneInfo("America/New_York"))
+        
+        # Task due in 1 hour
+        task1_data = {
+            "id": 1,
+            "name": "Task 1",
+            "frequencyType": "once",
+            "nextDueDate": (now + timedelta(hours=1)).isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        # Task due in 3 hours
+        task2_data = {
+            "id": 2,
+            "name": "Task 2",
+            "frequencyType": "once",
+            "nextDueDate": (now + timedelta(hours=3)).isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task1 = DonetickTask.from_json(task1_data)
+        task2 = DonetickTask.from_json(task2_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task1, 2: task2}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task1, task2]
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "past_due")
+        
+        next_transition = entity._calculate_next_transition_time()
+        
+        # Should pick task1's due time (earlier)
+        expected = now + timedelta(hours=1)
+        assert next_transition is not None
+        time_diff = (next_transition - expected).total_seconds()
+        assert 0 <= time_diff <= 5
+
+    def test_schedule_transition_called_on_server_change(self, mock_config_entry, mock_hass):
+        """Test that _schedule_next_transition is called when server data changes."""
+        now = datetime.now(ZoneInfo("America/New_York"))
+        task_data = {
+            "id": 1,
+            "name": "Task 1",
+            "frequencyType": "once",
+            "nextDueDate": (now + timedelta(hours=2)).isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "due_today")
+        
+        # Mock the scheduling method
+        with patch.object(entity, '_schedule_next_transition') as mock_schedule:
+            # First access - builds cache
+            entity.todo_items
+            
+            # Should have been called once during initial build
+            mock_schedule.assert_called_once()
+            mock_schedule.reset_mock()
+            
+            # Server data changes
+            coordinator.data_version = 2
+            
+            # Second access - should trigger reschedule
+            entity.todo_items
+            
+            mock_schedule.assert_called_once()
+
+    def test_schedule_transition_cancels_previous(self, mock_config_entry, mock_hass):
+        """Test that scheduling a new transition cancels the previous one."""
+        now = datetime.now(ZoneInfo("America/New_York"))
+        task_data = {
+            "id": 1,
+            "name": "Task 1",
+            "frequencyType": "once",
+            "nextDueDate": (now + timedelta(hours=2)).isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "due_today")
+        
+        # Simulate an existing cancel callback
+        mock_cancel = MagicMock()
+        entity._scheduled_transition_cancel = mock_cancel
+        
+        with patch('custom_components.donetick.todo.async_track_point_in_time', return_value=MagicMock()):
+            entity._schedule_next_transition()
+        
+        # Previous callback should have been called to cancel
+        mock_cancel.assert_called_once()
+
+    def test_transition_filters_by_assignee(self, mock_config_entry, mock_hass):
+        """Test that transition calculation respects assignee filtering."""
+        now = datetime.now(ZoneInfo("America/New_York"))
+        
+        # Task assigned to user 1
+        task1_data = {
+            "id": 1,
+            "name": "Task 1",
+            "frequencyType": "once",
+            "nextDueDate": (now + timedelta(hours=2)).isoformat(),
+            "isActive": True,
+            "assignedTo": 1,
+        }
+        # Unassigned task
+        task2_data = {
+            "id": 2,
+            "name": "Task 2",
+            "frequencyType": "once",
+            "nextDueDate": (now + timedelta(hours=1)).isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task1 = DonetickTask.from_json(task1_data)
+        task2 = DonetickTask.from_json(task2_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task1, 2: task2}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task1, task2]
+        
+        # Create entity for unassigned tasks
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "past_due")
+        
+        next_transition = entity._calculate_next_transition_time()
+        
+        # Should only consider task2 (unassigned), due in 1 hour
+        expected = now + timedelta(hours=1)
+        assert next_transition is not None
+        time_diff = (next_transition - expected).total_seconds()
+        assert 0 <= time_diff <= 5
+
+    @pytest.mark.asyncio
+    async def test_async_added_to_hass_schedules_transition(self, mock_config_entry, mock_hass):
+        """Test that transition is scheduled when entity is added to hass."""
+        now = datetime.now(ZoneInfo("America/New_York"))
+        task_data = {
+            "id": 1,
+            "name": "Task 1",
+            "frequencyType": "once",
+            "nextDueDate": (now + timedelta(hours=2)).isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        coordinator.async_add_listener = MagicMock(return_value=lambda: None)
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "due_today")
+        
+        with patch.object(entity, '_schedule_next_transition') as mock_schedule:
+            await entity.async_added_to_hass()
+            mock_schedule.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_async_will_remove_cancels_transition(self, mock_config_entry, mock_hass):
+        """Test that scheduled transition is cancelled when entity is removed."""
+        now = datetime.now(ZoneInfo("America/New_York"))
+        task_data = {
+            "id": 1,
+            "name": "Task 1",
+            "frequencyType": "once",
+            "nextDueDate": (now + timedelta(hours=2)).isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        coordinator.async_remove_listener = MagicMock()
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "due_today")
+        
+        # Simulate having a scheduled callback
+        mock_cancel = MagicMock()
+        entity._scheduled_transition_cancel = mock_cancel
+        
+        await entity.async_will_remove_from_hass()
+        
+        mock_cancel.assert_called_once()
+        assert entity._scheduled_transition_cancel is None
+
+    @pytest.mark.asyncio
+    async def test_transition_callback_triggers_state_update(self, mock_config_entry, mock_hass):
+        """Test that the transition callback triggers a state update and reschedules."""
+        now = datetime.now(ZoneInfo("America/New_York"))
+        task_data = {
+            "id": 1,
+            "name": "Task 1",
+            "frequencyType": "once",
+            "nextDueDate": (now + timedelta(hours=2)).isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "due_today")
+        
+        with patch.object(entity, 'async_write_ha_state') as mock_write_state:
+            with patch.object(entity, '_schedule_next_transition') as mock_schedule:
+                await entity._handle_transition_callback(now)
+                
+                mock_write_state.assert_called_once()
+                mock_schedule.assert_called_once()
+
+    def test_inactive_tasks_ignored_for_transitions(self, mock_config_entry, mock_hass):
+        """Test that inactive tasks don't trigger transitions."""
+        now = datetime.now(ZoneInfo("America/New_York"))
+        task_data = {
+            "id": 1,
+            "name": "Inactive Task",
+            "frequencyType": "once",
+            "nextDueDate": (now + timedelta(hours=1)).isoformat(),
+            "isActive": False,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "past_due")
+        
+        next_transition = entity._calculate_next_transition_time()
+        
+        # No transition should be scheduled for inactive task
+        assert next_transition is None
+
+    def test_tasks_without_due_date_ignored(self, mock_config_entry, mock_hass):
+        """Test that tasks without due dates don't trigger transitions."""
+        task_data = {
+            "id": 1,
+            "name": "No Due Date Task",
+            "frequencyType": "once",
+            "nextDueDate": None,
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "past_due")
+        
+        next_transition = entity._calculate_next_transition_time()
+        
+        assert next_transition is None

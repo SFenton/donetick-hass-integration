@@ -20,6 +20,7 @@ from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
 )
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_point_in_time
 
 from .const import (
     DOMAIN,
@@ -514,6 +515,7 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         self._list_type = list_type
         self._member = member
         self._cached_task_ids: set[int] = set()  # Track which task IDs are in this list
+        self._scheduled_transition_cancel: Optional[callable] = None  # Cancel callback for scheduled transition
         
         list_type_name = self.LIST_TYPE_NAMES.get(list_type, list_type.replace("_", " ").title())
         
@@ -575,8 +577,137 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
                     "%s: Rebuilt due to server changes (version %d, %d items)",
                     self._attr_name, self.coordinator.data_version, len(self._cached_todo_items)
                 )
+            
+            # Reschedule transitions when list content changes
+            self._schedule_next_transition()
         
         return self._cached_todo_items
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity being added to Home Assistant."""
+        await super().async_added_to_hass()
+        # Schedule the first transition check
+        self._schedule_next_transition()
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Handle entity removal from Home Assistant."""
+        await super().async_will_remove_from_hass()
+        # Cancel any scheduled transition
+        if self._scheduled_transition_cancel:
+            self._scheduled_transition_cancel()
+            self._scheduled_transition_cancel = None
+
+    def _schedule_next_transition(self) -> None:
+        """Schedule a state update at the next task transition time.
+        
+        This ensures tasks move between lists at exactly the right moment,
+        not just when the coordinator syncs.
+        """
+        # Cancel any existing scheduled transition
+        if self._scheduled_transition_cancel:
+            self._scheduled_transition_cancel()
+            self._scheduled_transition_cancel = None
+        
+        next_transition = self._calculate_next_transition_time()
+        if next_transition is None:
+            _LOGGER.debug("%s: No upcoming transitions to schedule", self._attr_name)
+            return
+        
+        _LOGGER.debug(
+            "%s: Scheduling transition at %s",
+            self._attr_name, next_transition.isoformat()
+        )
+        
+        self._scheduled_transition_cancel = async_track_point_in_time(
+            self.hass,
+            self._handle_transition_callback,
+            next_transition
+        )
+
+    async def _handle_transition_callback(self, now: datetime) -> None:
+        """Handle the scheduled transition callback."""
+        _LOGGER.debug("%s: Transition callback fired at %s", self._attr_name, now.isoformat())
+        
+        # Trigger a state update - this will cause todo_items to be re-evaluated
+        self.async_write_ha_state()
+        
+        # Schedule the next transition
+        self._schedule_next_transition()
+
+    def _calculate_next_transition_time(self) -> Optional[datetime]:
+        """Calculate when the next task will transition into or out of this list.
+        
+        Returns the earliest time at which a task will move, or None if no transitions pending.
+        
+        For each list type:
+        - past_due: Tasks enter when their due time passes (due_datetime)
+        - due_today: Tasks enter at midnight (start of due day), exit when due time passes
+        - upcoming: Tasks exit at midnight when they become due_today
+        """
+        if self.coordinator.data is None:
+            return None
+        
+        local_now = self._get_local_now()
+        today_start = self._get_local_today_start()
+        today_end = self._get_local_today_end()
+        
+        # Add a small buffer (1 second) to avoid edge cases
+        buffer = timedelta(seconds=1)
+        
+        next_times: list[datetime] = []
+        
+        for task in self.coordinator.tasks_list:
+            if not task.is_active or task.next_due_date is None:
+                continue
+            
+            # Filter by assignee (same logic as _filter_tasks)
+            if self._member:
+                if task.assigned_to != self._member.user_id:
+                    continue
+            else:
+                if task.assigned_to is not None:
+                    continue
+            
+            task_due = task.next_due_date
+            if task_due.tzinfo is None:
+                task_due = task_due.replace(tzinfo=ZoneInfo("UTC"))
+            
+            if self._list_type == "past_due":
+                # Tasks enter past_due when their due time passes
+                # Only schedule for tasks currently in due_today (due today and not yet past)
+                if today_start <= task_due <= today_end and task_due > local_now:
+                    # This task will become past_due at task_due
+                    next_times.append(task_due + buffer)
+                    
+            elif self._list_type == "due_today":
+                # Tasks enter due_today at midnight of their due date
+                # Tasks exit due_today when their due time passes (move to past_due)
+                
+                if task_due > today_end:
+                    # Task is upcoming - will enter due_today at midnight
+                    # Calculate midnight of the task's due date in local time
+                    task_local = task_due.astimezone(ZoneInfo(str(self.hass.config.time_zone)))
+                    task_midnight = task_local.replace(hour=0, minute=0, second=0, microsecond=0)
+                    if task_midnight > local_now:
+                        next_times.append(task_midnight + buffer)
+                
+                elif today_start <= task_due <= today_end and task_due > local_now:
+                    # Task is currently in due_today - will exit when due time passes
+                    next_times.append(task_due + buffer)
+                    
+            elif self._list_type == "upcoming":
+                # Tasks exit upcoming at midnight when they become due_today
+                if task_due > today_end:
+                    # Calculate midnight of the task's due date
+                    task_local = task_due.astimezone(ZoneInfo(str(self.hass.config.time_zone)))
+                    task_midnight = task_local.replace(hour=0, minute=0, second=0, microsecond=0)
+                    if task_midnight > local_now:
+                        next_times.append(task_midnight + buffer)
+        
+        if not next_times:
+            return None
+        
+        return min(next_times)
 
     def _filter_tasks(self, tasks):
         """Filter tasks based on date and assignee criteria."""
