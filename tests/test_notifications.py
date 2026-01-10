@@ -438,7 +438,7 @@ class TestNotificationActionHandlers:
             mock_client.async_update_task.assert_called_once()
             call_kwargs = mock_client.async_update_task.call_args[1]
             assert call_kwargs["task_id"] == 101
-            assert "due_date" in call_kwargs
+            assert "next_due_date" in call_kwargs
             
             # Verify refresh was triggered
             mock_refresh.assert_called_once()
@@ -539,9 +539,9 @@ class TestSnoozeTimeDelta:
             await _handle_snooze_action(mock_hass, mock_config_entry, 101, hours=1)
             after = datetime.now(ZoneInfo("America/New_York"))
             
-            # Check the due_date was set approximately 1 hour from now
+            # Check the next_due_date was set approximately 1 hour from now
             call_kwargs = mock_client.async_update_task.call_args[1]
-            due_date_str = call_kwargs["due_date"]
+            due_date_str = call_kwargs["next_due_date"]
             due_date = datetime.fromisoformat(due_date_str)
             
             expected_min = before + timedelta(hours=1)
@@ -569,9 +569,9 @@ class TestSnoozeTimeDelta:
             await _handle_snooze_action(mock_hass, mock_config_entry, 101, hours=24)
             after = datetime.now(ZoneInfo("America/New_York"))
             
-            # Check the due_date was set approximately 24 hours from now
+            # Check the next_due_date was set approximately 24 hours from now
             call_kwargs = mock_client.async_update_task.call_args[1]
-            due_date_str = call_kwargs["due_date"]
+            due_date_str = call_kwargs["next_due_date"]
             due_date = datetime.fromisoformat(due_date_str)
             
             expected_min = before + timedelta(hours=24)

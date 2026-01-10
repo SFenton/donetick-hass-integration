@@ -540,6 +540,7 @@ class DonetickApiClient:
         name: str = None,
         description: str = None,
         due_date: str = None,
+        next_due_date: str = None,
         # Extended properties (JWT only)
         frequency_type: str = None,
         frequency: int = None,
@@ -561,7 +562,11 @@ class DonetickApiClient:
         """Update an existing task.
         
         With JWT auth, supports full ChoreReq properties.
-        With API key auth, only supports name, description, due_date.
+        With API key auth, only supports name, description, due_date, next_due_date.
+        
+        Args:
+            due_date: The task's base/original due date definition
+            next_due_date: The next occurrence date (for snoozing/rescheduling)
         """
         if self.is_jwt_auth:
             # First get the current task to merge with updates
@@ -574,6 +579,8 @@ class DonetickApiClient:
                 payload["description"] = description
             if due_date:
                 payload["dueDate"] = due_date
+            if next_due_date:
+                payload["nextDueDate"] = next_due_date
             if frequency_type:
                 payload["frequencyType"] = frequency_type
             if frequency is not None:
@@ -618,6 +625,8 @@ class DonetickApiClient:
                 payload["description"] = description
             if due_date:
                 payload["dueDate"] = due_date
+            if next_due_date:
+                payload["nextDueDate"] = next_due_date
             
             if not payload:
                 raise ValueError("At least one field must be provided for update")

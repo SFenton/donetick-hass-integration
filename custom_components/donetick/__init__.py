@@ -752,10 +752,10 @@ async def _handle_snooze_action(hass: HomeAssistant, entry: ConfigEntry, task_id
         tz = ZoneInfo(hass.config.time_zone)
         new_due_date = datetime.now(tz) + timedelta(hours=hours)
         
-        # Update the task with new due date
+        # Update the task's next due date (not the base due_date, but nextDueDate)
         await client.async_update_task(
             task_id=task_id,
-            due_date=new_due_date.isoformat()
+            next_due_date=new_due_date.isoformat()
         )
         _LOGGER.info("Task %d snoozed to %s via notification action", task_id, new_due_date.isoformat())
         
