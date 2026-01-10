@@ -409,6 +409,10 @@ class DonetickApiClient:
             params = {"completedBy": completed_by} if completed_by else None
             data = await self._request("POST", endpoint, params=params)
         
+        # Handle wrapped response (API may return {"res": {...}})
+        if isinstance(data, dict) and "res" in data:
+            data = data["res"]
+        
         return DonetickTask.from_json(data)
 
     async def async_create_task(
@@ -492,6 +496,12 @@ class DonetickApiClient:
             endpoint = "/eapi/v1/chore"
         
         data = await self._request("POST", endpoint, json_data=payload)
+        
+        # Handle wrapped response (API may return {"res": {...}})
+        if isinstance(data, dict) and "res" in data:
+            data = data["res"]
+        
+        _LOGGER.debug("Create task response: %s", data)
         return DonetickTask.from_json(data)
 
     async def async_update_task(
@@ -585,6 +595,11 @@ class DonetickApiClient:
             endpoint = f"/eapi/v1/chore/{task_id}"
             data = await self._request("PUT", endpoint, json_data=payload)
         
+        # Handle wrapped response (API may return {"res": {...}})
+        if isinstance(data, dict) and "res" in data:
+            data = data["res"]
+        
+        _LOGGER.debug("Update task response: %s", data)
         return DonetickTask.from_json(data)
 
     async def async_delete_task(self, task_id: int) -> bool:
@@ -608,6 +623,11 @@ class DonetickApiClient:
         
         endpoint = f"/api/v1/chores/{chore_id}/skip"
         data = await self._request("POST", endpoint)
+        
+        # Handle wrapped response (API may return {"res": {...}})
+        if isinstance(data, dict) and "res" in data:
+            data = data["res"]
+        
         return DonetickTask.from_json(data)
 
     async def async_update_priority(self, chore_id: int, priority: int) -> bool:

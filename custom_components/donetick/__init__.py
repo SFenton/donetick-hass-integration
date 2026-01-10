@@ -43,7 +43,7 @@ COMPLETE_TASK_SCHEMA = vol.Schema({
 })
 
 CREATE_TASK_SCHEMA = vol.Schema({
-    vol.Required("name"): cv.string,
+    vol.Required("name"): vol.All(cv.string, vol.Length(min=1)),
     vol.Optional("description"): cv.string,
     vol.Optional("due_date"): cv.string,
     vol.Optional("created_by"): cv.positive_int,
@@ -94,7 +94,7 @@ DELETE_TASK_SCHEMA = vol.Schema({
 })
 
 CREATE_TASK_FORM_SCHEMA = vol.Schema({
-    vol.Required("name"): cv.string,
+    vol.Required("name"): vol.All(cv.string, vol.Length(min=1)),
     vol.Optional("description"): cv.string,
     vol.Optional("due_date"): cv.string,  # Will accept datetime from UI
     vol.Optional("priority", default="none"): vol.In(["none", "low", "medium", "high"]),
@@ -260,6 +260,10 @@ async def async_complete_task_service(hass: HomeAssistant, call: ServiceCall) ->
 async def async_create_task_service(hass: HomeAssistant, call: ServiceCall) -> None:
     """Handle the create_task service call."""
     name = call.data["name"]
+    if not name or not name.strip():
+        _LOGGER.error("Task name cannot be empty")
+        raise vol.Invalid("Task name is required and cannot be empty")
+    name = name.strip()
     description = call.data.get("description")
     due_date = call.data.get("due_date")
     created_by = call.data.get("created_by")
@@ -406,6 +410,10 @@ async def async_delete_task_service(hass: HomeAssistant, call: ServiceCall) -> N
 async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall) -> None:
     """Handle the create_task_form service call with user-friendly field names."""
     name = call.data["name"]
+    if not name or not name.strip():
+        _LOGGER.error("Task name cannot be empty")
+        raise vol.Invalid("Task name is required and cannot be empty")
+    name = name.strip()
     description = call.data.get("description")
     due_date_raw = call.data.get("due_date")
     config_entry_id = call.data.get("config_entry_id")
