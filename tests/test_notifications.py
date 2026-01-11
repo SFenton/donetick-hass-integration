@@ -604,3 +604,149 @@ class TestSnoozeTimeDelta:
             
             expected = original_due_date + timedelta(hours=24)
             assert due_date == expected
+
+
+# ==================== NotificationStore Tests ====================
+
+class TestNotificationStoreBasic:
+    """Tests for NotificationStore basic operations."""
+    
+    def test_was_notified_empty_store(self, mock_hass):
+        """Test was_notified returns False for empty store."""
+        from custom_components.donetick.todo import NotificationStore
+        
+        store = NotificationStore(mock_hass, "test_entry")
+        store._loaded = True  # Skip loading
+        
+        due_date = datetime(2025, 1, 15, 9, 0, tzinfo=ZoneInfo("UTC"))
+        assert store.was_notified(42, due_date) is False
+    
+    def test_mark_and_check_notified(self, mock_hass):
+        """Test marking a task as notified and checking it."""
+        from custom_components.donetick.todo import NotificationStore
+        
+        store = NotificationStore(mock_hass, "test_entry")
+        store._loaded = True
+        
+        due_date = datetime(2025, 1, 15, 9, 0, tzinfo=ZoneInfo("UTC"))
+        
+        # Before marking
+        assert store.was_notified(42, due_date) is False
+        
+        # Mark as notified
+        store.mark_notified(42, due_date)
+        
+        # After marking
+        assert store.was_notified(42, due_date) is True
+    
+    def test_was_notified_different_due_date(self, mock_hass):
+        """Test was_notified returns False for different due date."""
+        from custom_components.donetick.todo import NotificationStore
+        
+        store = NotificationStore(mock_hass, "test_entry")
+        store._loaded = True
+        
+        old_due_date = datetime(2025, 1, 15, 9, 0, tzinfo=ZoneInfo("UTC"))
+        new_due_date = datetime(2025, 1, 22, 9, 0, tzinfo=ZoneInfo("UTC"))
+        
+        # Mark with old due date
+        store.mark_notified(42, old_due_date)
+        
+        # Check with new due date - should return False
+        assert store.was_notified(42, new_due_date) is False
+    
+    def test_clear_task(self, mock_hass):
+        """Test clearing a task from the store."""
+        from custom_components.donetick.todo import NotificationStore
+        
+        store = NotificationStore(mock_hass, "test_entry")
+        store._loaded = True
+        
+        due_date = datetime(2025, 1, 15, 9, 0, tzinfo=ZoneInfo("UTC"))
+        
+        store.mark_notified(42, due_date)
+        assert store.was_notified(42, due_date) is True
+        
+        store.clear_task(42)
+        assert store.was_notified(42, due_date) is False
+    
+    def test_prune_old_entries(self, mock_hass):
+        """Test pruning entries for tasks no longer in past_due."""
+        from custom_components.donetick.todo import NotificationStore
+        
+        store = NotificationStore(mock_hass, "test_entry")
+        store._loaded = True
+        
+        due_date = datetime(2025, 1, 15, 9, 0, tzinfo=ZoneInfo("UTC"))
+        
+        # Add several tasks
+        store.mark_notified(42, due_date)
+        store.mark_notified(43, due_date)
+        store.mark_notified(44, due_date)
+        
+        # Prune with only task 42 still in past_due
+        pruned = store.prune_old_entries({42})
+        
+        assert pruned == 2
+        assert store.was_notified(42, due_date) is True
+        assert "43" not in store._data
+        assert "44" not in store._data
+
+
+class TestNotificationStorePersistence:
+    """Tests for NotificationStore persistence."""
+    
+    @pytest.mark.asyncio
+    async def test_async_load_empty(self, mock_hass):
+        """Test loading from empty storage."""
+        from custom_components.donetick.todo import NotificationStore
+        
+        with patch("homeassistant.helpers.storage.Store.async_load", new_callable=AsyncMock) as mock_load:
+            mock_load.return_value = None
+            
+            store = NotificationStore(mock_hass, "test_entry")
+            await store.async_load()
+            
+            assert store._loaded is True
+            assert store._data == {}
+    
+    @pytest.mark.asyncio
+    async def test_async_load_with_data(self, mock_hass):
+        """Test loading existing data from storage."""
+        from custom_components.donetick.todo import NotificationStore
+        
+        stored_data = {
+            "notified_tasks": {
+                "42": "2025-01-15T09:00:00+00:00",
+                "43": "2025-01-14T10:00:00+00:00",
+            }
+        }
+        
+        with patch("homeassistant.helpers.storage.Store.async_load", new_callable=AsyncMock) as mock_load:
+            mock_load.return_value = stored_data
+            
+            store = NotificationStore(mock_hass, "test_entry")
+            await store.async_load()
+            
+            assert store._loaded is True
+            assert "42" in store._data
+            assert store._data["42"] == "2025-01-15T09:00:00+00:00"
+    
+    @pytest.mark.asyncio
+    async def test_async_save(self, mock_hass):
+        """Test saving data to storage."""
+        from custom_components.donetick.todo import NotificationStore
+        
+        with patch("homeassistant.helpers.storage.Store.async_save", new_callable=AsyncMock) as mock_save:
+            store = NotificationStore(mock_hass, "test_entry")
+            store._loaded = True
+            
+            due_date = datetime(2025, 1, 15, 9, 0, tzinfo=ZoneInfo("UTC"))
+            store.mark_notified(42, due_date)
+            
+            await store.async_save()
+            
+            mock_save.assert_called_once()
+            saved_data = mock_save.call_args[0][0]
+            assert "notified_tasks" in saved_data
+            assert "42" in saved_data["notified_tasks"]

@@ -1,5 +1,8 @@
 """The Donetick integration."""
 import logging
+import re
+import zoneinfo
+from datetime import datetime, timedelta
 import voluptuous as vol
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.config_entries import ConfigEntry
@@ -19,6 +22,88 @@ from .const import (
     CONF_WEBHOOK_ID,
 )
 from .api import DonetickApiClient
+
+
+def normalize_datetime_string(datetime_str: str, local_tz: zoneinfo.ZoneInfo) -> str:
+    """Normalize an incomplete datetime string by filling in missing components.
+    
+    Rules:
+    1. If there's no minute, default to 0.
+    2. If there's no hour, default to the current local hour.
+    3. If there is a due date but no time (no 'T'), set the due time for 11:59 PM local time.
+    4. If only seconds are provided (no hour or minute), set time to 23:59:ss local time.
+    
+    Args:
+        datetime_str: The datetime string to normalize (may be incomplete).
+        local_tz: The local timezone for determining current hour and for date-only defaults.
+    
+    Returns:
+        A normalized datetime string that can be parsed by datetime.fromisoformat().
+    """
+    if not datetime_str:
+        return datetime_str
+    
+    datetime_str = datetime_str.strip()
+    
+    # If already has timezone info, return as-is (it's complete enough)
+    # Check for Z suffix first
+    if datetime_str.endswith('Z'):
+        return datetime_str
+    
+    # Check for +/- timezone offset - only look in the time portion (after T)
+    if 'T' in datetime_str:
+        time_portion = datetime_str.split('T', 1)[1]
+        # Timezone offsets like +05:00, -08:00, +0500, -0800
+        if '+' in time_portion or '-' in time_portion:
+            return datetime_str
+    
+    # Check if this is date-only (no 'T' separator)
+    if 'T' not in datetime_str:
+        # Date only - set time to 23:59:00 (11:59 PM) local time
+        return f"{datetime_str}T23:59:00"
+    
+    # Has 'T' separator - check if time components are complete
+    date_part, time_part = datetime_str.split('T', 1)
+    
+    # Parse the time components
+    time_components = time_part.split(':')
+    
+    now_local = datetime.now(local_tz)
+    
+    if len(time_components) == 1:
+        # Only hour provided (e.g., "2025-01-11T14")
+        hour_str = time_components[0]
+        if hour_str:
+            # Hour provided, default minute to 0
+            return f"{date_part}T{hour_str.zfill(2)}:00:00"
+        else:
+            # No hour - use current local hour, minute 0
+            return f"{date_part}T{now_local.hour:02d}:00:00"
+    elif len(time_components) == 2:
+        # Hour and minute provided (e.g., "2025-01-11T14:30")
+        hour_str, minute_str = time_components
+        if not hour_str:
+            hour_str = f"{now_local.hour:02d}"
+        if not minute_str:
+            minute_str = "00"
+        return f"{date_part}T{hour_str.zfill(2)}:{minute_str.zfill(2)}:00"
+    else:
+        # All three components present (hour, minute, seconds)
+        hour_str, minute_str, seconds_str = time_components[0], time_components[1], time_components[2]
+        
+        # If only seconds provided (hour and minute are empty), use 23:59:ss
+        if not hour_str and not minute_str and seconds_str:
+            return f"{date_part}T23:59:{seconds_str.zfill(2)}"
+        
+        # Fill in any missing components
+        if not hour_str:
+            hour_str = f"{now_local.hour:02d}"
+        if not minute_str:
+            minute_str = "00"
+        if not seconds_str:
+            seconds_str = "00"
+        
+        return f"{date_part}T{hour_str.zfill(2)}:{minute_str.zfill(2)}:{seconds_str.zfill(2)}"
 from .webhook import (
     generate_webhook_id,
     get_webhook_url,
@@ -461,8 +546,6 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
     # Build frequency_metadata with timezone info for recurring tasks
     # This is required by Donetick for proper next-due-date calculation
     if recurrence != "no_repeat" and recurrence != "once":
-        from datetime import datetime
-        import zoneinfo
         local_tz = zoneinfo.ZoneInfo(hass.config.time_zone)
         now_local = datetime.now(local_tz)
         
@@ -528,18 +611,19 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
         if isinstance(due_date_raw, str):
             # Strip whitespace that may come from Jinja templates
             due_date = due_date_raw.strip()
+            # Get local timezone for normalization
+            local_tz = zoneinfo.ZoneInfo(hass.config.time_zone)
             # If it already has timezone info, use as-is
             if due_date and (due_date.endswith('Z') or '+' in due_date[-6:]):
                 _LOGGER.debug("Due date already has timezone: %r", due_date)
             elif due_date and 'T' in due_date:
                 # No timezone - treat as local time and convert to UTC
                 try:
-                    from datetime import datetime
-                    import zoneinfo
+                    # Normalize incomplete datetime strings (missing minute, hour, etc.)
+                    normalized = normalize_datetime_string(due_date, local_tz)
+                    _LOGGER.debug("Normalized datetime string from %r to %r", due_date, normalized)
                     # Parse as naive datetime
-                    naive_dt = datetime.fromisoformat(due_date)
-                    # Get Home Assistant's timezone
-                    local_tz = zoneinfo.ZoneInfo(hass.config.time_zone)
+                    naive_dt = datetime.fromisoformat(normalized)
                     # Localize to HA timezone
                     local_dt = naive_dt.replace(tzinfo=local_tz)
                     # Convert to UTC and format as RFC3339
@@ -550,24 +634,22 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
                     _LOGGER.warning("Could not convert due date timezone: %s, using as-is with Z suffix", e)
                     due_date = due_date + "Z"
             elif due_date:
-                # Just a date without time - add noon local time
+                # Just a date without time - set time to 11:59 PM local time
                 try:
-                    from datetime import datetime
-                    import zoneinfo
-                    naive_dt = datetime.fromisoformat(due_date + "T12:00:00")
-                    local_tz = zoneinfo.ZoneInfo(hass.config.time_zone)
+                    # Normalize will add T23:59:00 for date-only strings
+                    normalized = normalize_datetime_string(due_date, local_tz)
+                    _LOGGER.debug("Normalized date-only string from %r to %r", due_date, normalized)
+                    naive_dt = datetime.fromisoformat(normalized)
                     local_dt = naive_dt.replace(tzinfo=local_tz)
                     utc_dt = local_dt.astimezone(zoneinfo.ZoneInfo("UTC"))
                     due_date = utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-                    _LOGGER.debug("Converted date-only to UTC noon: %r", due_date)
+                    _LOGGER.debug("Converted date-only to UTC 11:59 PM: %r", due_date)
                 except Exception as e:
                     _LOGGER.warning("Could not convert date-only timezone: %s", e)
-                    due_date = due_date + "T12:00:00Z"
+                    due_date = due_date + "T23:59:00Z"
         else:
             # Convert datetime object to RFC3339 format
             try:
-                from datetime import datetime
-                import zoneinfo
                 if hasattr(due_date_raw, 'isoformat'):
                     # Check if it has timezone info
                     if hasattr(due_date_raw, 'tzinfo') and due_date_raw.tzinfo is not None:
@@ -736,8 +818,6 @@ async def _handle_snooze_action(hass: HomeAssistant, entry: ConfigEntry, task_id
     
     Snoozing adds hours to the task's current due date.
     """
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
     from .todo import NotificationManager
     
     _LOGGER.info("Snoozing task %d for %d hours from notification action", task_id, hours)

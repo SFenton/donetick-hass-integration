@@ -2,6 +2,8 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 import voluptuous as vol
+from datetime import datetime
+import zoneinfo
 
 import sys
 from pathlib import Path
@@ -14,6 +16,8 @@ from custom_components.donetick import (
     async_create_task_service,
     async_update_task_service,
     async_delete_task_service,
+    async_create_task_form_service,
+    normalize_datetime_string,
     _get_api_client,
     _get_config_entry,
     COMPLETE_TASK_SCHEMA,
@@ -626,3 +630,261 @@ class TestDeleteTaskService:
                     await async_delete_task_service(mock_hass, mock_call)
                 
                 mock_client.async_delete_task.assert_called_once_with(1)
+
+
+class TestNormalizeDatetimeString:
+    """Tests for normalize_datetime_string helper function."""
+
+    @pytest.fixture
+    def local_tz(self):
+        """Create a local timezone for testing."""
+        return zoneinfo.ZoneInfo("America/New_York")
+
+    def test_empty_string_returns_empty(self, local_tz):
+        """Test that empty string is returned as-is."""
+        assert normalize_datetime_string("", local_tz) == ""
+        assert normalize_datetime_string(None, local_tz) is None
+
+    def test_string_with_z_suffix_unchanged(self, local_tz):
+        """Test that strings with Z suffix are returned unchanged."""
+        dt_str = "2025-01-11T14:30:00Z"
+        assert normalize_datetime_string(dt_str, local_tz) == dt_str
+
+    def test_string_with_timezone_offset_unchanged(self, local_tz):
+        """Test that strings with timezone offset are returned unchanged."""
+        dt_str = "2025-01-11T14:30:00+05:00"
+        assert normalize_datetime_string(dt_str, local_tz) == dt_str
+        
+        dt_str2 = "2025-01-11T14:30:00-08:00"
+        assert normalize_datetime_string(dt_str2, local_tz) == dt_str2
+
+    def test_date_only_gets_2359(self, local_tz):
+        """Test that date-only strings get 23:59:00 time appended."""
+        result = normalize_datetime_string("2025-01-11", local_tz)
+        assert result == "2025-01-11T23:59:00"
+
+    def test_hour_only_defaults_minute_to_zero(self, local_tz):
+        """Test that hour-only time defaults minute to 0."""
+        result = normalize_datetime_string("2025-01-11T14", local_tz)
+        assert result == "2025-01-11T14:00:00"
+
+    def test_hour_only_single_digit(self, local_tz):
+        """Test that single-digit hour is zero-padded."""
+        result = normalize_datetime_string("2025-01-11T9", local_tz)
+        assert result == "2025-01-11T09:00:00"
+
+    def test_hour_and_minute_without_seconds(self, local_tz):
+        """Test that hour:minute format gets seconds appended."""
+        result = normalize_datetime_string("2025-01-11T14:30", local_tz)
+        assert result == "2025-01-11T14:30:00"
+
+    def test_complete_datetime_unchanged(self, local_tz):
+        """Test that complete datetime strings are unchanged."""
+        dt_str = "2025-01-11T14:30:45"
+        assert normalize_datetime_string(dt_str, local_tz) == dt_str
+
+    def test_empty_hour_uses_current_hour(self, local_tz):
+        """Test that empty hour uses current local hour."""
+        # This is an edge case - if someone passes "2025-01-11T" with no hour
+        result = normalize_datetime_string("2025-01-11T", local_tz)
+        now_hour = datetime.now(local_tz).hour
+        assert result == f"2025-01-11T{now_hour:02d}:00:00"
+
+    def test_hour_with_empty_minute(self, local_tz):
+        """Test that hour with empty minute defaults minute to 0."""
+        result = normalize_datetime_string("2025-01-11T14:", local_tz)
+        assert result == "2025-01-11T14:00:00"
+
+    def test_whitespace_stripped(self, local_tz):
+        """Test that leading/trailing whitespace is stripped."""
+        result = normalize_datetime_string("  2025-01-11T14  ", local_tz)
+        assert result == "2025-01-11T14:00:00"
+
+    def test_seconds_only_uses_2359(self, local_tz):
+        """Test that seconds-only time uses 23:59:ss."""
+        result = normalize_datetime_string("2025-01-11T::30", local_tz)
+        assert result == "2025-01-11T23:59:30"
+
+    def test_seconds_only_single_digit(self, local_tz):
+        """Test that single-digit seconds-only is zero-padded."""
+        result = normalize_datetime_string("2025-01-11T::5", local_tz)
+        assert result == "2025-01-11T23:59:05"
+
+    def test_hour_and_seconds_only(self, local_tz):
+        """Test that hour and seconds without minute uses minute 00."""
+        result = normalize_datetime_string("2025-01-11T14::30", local_tz)
+        assert result == "2025-01-11T14:00:30"
+
+
+class TestCreateTaskFormServiceDueDateHandling:
+    """Tests for async_create_task_form_service due date handling."""
+
+    @pytest.fixture
+    def mock_hass(self):
+        """Create mock Home Assistant instance."""
+        hass = MagicMock()
+        hass.data = {DOMAIN: {"test_entry_id": {
+            CONF_URL: "https://donetick.example.com",
+            CONF_AUTH_TYPE: AUTH_TYPE_JWT,
+            CONF_USERNAME: "testuser",
+            CONF_PASSWORD: "testpass",
+        }}}
+        hass.config = MagicMock()
+        hass.config.time_zone = "America/New_York"
+        return hass
+
+    @pytest.fixture
+    def mock_call_with_due_date(self):
+        """Create a factory for mock service calls with custom due_date."""
+        def _create_call(due_date):
+            call = MagicMock()
+            call.data = {
+                "name": "Test Task",
+                "due_date": due_date,
+            }
+            return call
+        return _create_call
+
+    @pytest.mark.asyncio
+    async def test_hour_only_defaults_minute_to_zero(self, mock_hass, mock_call_with_due_date):
+        """Test that providing only hour defaults minute to 0."""
+        mock_call = mock_call_with_due_date("2025-01-11T14")
+        
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_task = MagicMock()
+                mock_task.id = 123
+                mock_client.async_create_task = AsyncMock(return_value=mock_task)
+                mock_get_client.return_value = mock_client
+                
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock):
+                    await async_create_task_form_service(mock_hass, mock_call)
+                
+                # Verify the API was called with a properly formatted due_date
+                call_kwargs = mock_client.async_create_task.call_args[1]
+                due_date = call_kwargs["due_date"]
+                # Should be in UTC format with minute = 0
+                assert due_date is not None
+                assert due_date.endswith("Z")
+                # Parse it back and verify minute is 0 when converted to local
+                parsed = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                local_tz = zoneinfo.ZoneInfo("America/New_York")
+                local_dt = parsed.astimezone(local_tz)
+                assert local_dt.hour == 14
+                assert local_dt.minute == 0
+
+    @pytest.mark.asyncio
+    async def test_date_only_sets_time_to_2359(self, mock_hass, mock_call_with_due_date):
+        """Test that date-only sets time to 11:59 PM local time."""
+        mock_call = mock_call_with_due_date("2025-01-11")
+        
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_task = MagicMock()
+                mock_task.id = 123
+                mock_client.async_create_task = AsyncMock(return_value=mock_task)
+                mock_get_client.return_value = mock_client
+                
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock):
+                    await async_create_task_form_service(mock_hass, mock_call)
+                
+                call_kwargs = mock_client.async_create_task.call_args[1]
+                due_date = call_kwargs["due_date"]
+                assert due_date is not None
+                assert due_date.endswith("Z")
+                # Parse it back and verify time is 23:59 local
+                parsed = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                local_tz = zoneinfo.ZoneInfo("America/New_York")
+                local_dt = parsed.astimezone(local_tz)
+                assert local_dt.hour == 23
+                assert local_dt.minute == 59
+
+    @pytest.mark.asyncio
+    async def test_complete_datetime_preserved(self, mock_hass, mock_call_with_due_date):
+        """Test that complete datetime is preserved correctly."""
+        mock_call = mock_call_with_due_date("2025-01-11T14:30:00")
+        
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_task = MagicMock()
+                mock_task.id = 123
+                mock_client.async_create_task = AsyncMock(return_value=mock_task)
+                mock_get_client.return_value = mock_client
+                
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock):
+                    await async_create_task_form_service(mock_hass, mock_call)
+                
+                call_kwargs = mock_client.async_create_task.call_args[1]
+                due_date = call_kwargs["due_date"]
+                assert due_date is not None
+                assert due_date.endswith("Z")
+                # Parse it back and verify time is preserved
+                parsed = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                local_tz = zoneinfo.ZoneInfo("America/New_York")
+                local_dt = parsed.astimezone(local_tz)
+                assert local_dt.hour == 14
+                assert local_dt.minute == 30
+
+    @pytest.mark.asyncio
+    async def test_datetime_with_timezone_preserved(self, mock_hass, mock_call_with_due_date):
+        """Test that datetime with timezone info is preserved."""
+        mock_call = mock_call_with_due_date("2025-01-11T14:30:00Z")
+        
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_task = MagicMock()
+                mock_task.id = 123
+                mock_client.async_create_task = AsyncMock(return_value=mock_task)
+                mock_get_client.return_value = mock_client
+                
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock):
+                    await async_create_task_form_service(mock_hass, mock_call)
+                
+                call_kwargs = mock_client.async_create_task.call_args[1]
+                due_date = call_kwargs["due_date"]
+                # Should be passed through unchanged since it already has timezone
+                assert due_date == "2025-01-11T14:30:00Z"
+
+    @pytest.mark.asyncio
+    async def test_no_due_date_passes_none(self, mock_hass):
+        """Test that no due_date passes None to API."""
+        mock_call = MagicMock()
+        mock_call.data = {"name": "Test Task"}  # No due_date
+        
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_task = MagicMock()
+                mock_task.id = 123
+                mock_client.async_create_task = AsyncMock(return_value=mock_task)
+                mock_get_client.return_value = mock_client
+                
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock):
+                    await async_create_task_form_service(mock_hass, mock_call)
+                
+                call_kwargs = mock_client.async_create_task.call_args[1]
+                assert call_kwargs["due_date"] is None

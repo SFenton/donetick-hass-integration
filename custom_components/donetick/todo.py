@@ -21,6 +21,7 @@ from homeassistant.helpers.update_coordinator import (
 )
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_point_in_time
+from homeassistant.helpers.storage import Store
 
 from .const import (
     DOMAIN,
@@ -40,6 +41,8 @@ from .const import (
     CONF_NOTIFY_ON_PAST_DUE,
     CONF_ASSIGNEE_NOTIFICATIONS,
     NOTIFICATION_REMINDER_INTERVAL,
+    NOTIFICATION_STORAGE_KEY,
+    NOTIFICATION_STORAGE_VERSION,
     PRIORITY_P1,
     PRIORITY_P2,
     CONF_UPCOMING_DAYS,
@@ -402,6 +405,105 @@ class NotificationManager:
             cancel()
             del _notification_reminders[reminder_key]
             _LOGGER.debug("Cancelled %s reminder for task %d", "unassigned" if is_unassigned else "assigned", task_id)
+
+
+class NotificationStore:
+    """Persistent storage for notification tracking.
+    
+    Stores which tasks have been notified about to prevent duplicate 
+    notifications after Home Assistant restarts. Tracks task_id -> due_date
+    so that we can notify again if a task becomes overdue with a new due date
+    (e.g., after completing a recurring task).
+    """
+    
+    def __init__(self, hass: HomeAssistant, entry_id: str) -> None:
+        """Initialize the notification store."""
+        self._hass = hass
+        self._entry_id = entry_id
+        self._store = Store(
+            hass, 
+            NOTIFICATION_STORAGE_VERSION, 
+            f"{NOTIFICATION_STORAGE_KEY}_{entry_id}"
+        )
+        self._data: dict[str, str] = {}  # task_id (str) -> due_date ISO string
+        self._loaded = False
+    
+    async def async_load(self) -> None:
+        """Load notification data from storage."""
+        if self._loaded:
+            return
+        
+        data = await self._store.async_load()
+        if data is not None:
+            self._data = data.get("notified_tasks", {})
+            _LOGGER.debug(
+                "Loaded %d notified task entries from storage",
+                len(self._data)
+            )
+        self._loaded = True
+    
+    async def async_save(self) -> None:
+        """Save notification data to storage."""
+        await self._store.async_save({"notified_tasks": self._data})
+    
+    def was_notified(self, task_id: int, due_date: datetime | None) -> bool:
+        """Check if we already sent a notification for this task's due date.
+        
+        Args:
+            task_id: The task ID to check.
+            due_date: The task's current due date.
+            
+        Returns:
+            True if we already notified for this exact task+due_date combo.
+        """
+        task_key = str(task_id)
+        if task_key not in self._data:
+            return False
+        
+        # Compare stored due date with current due date
+        stored_due = self._data[task_key]
+        current_due = due_date.isoformat() if due_date else ""
+        
+        return stored_due == current_due
+    
+    def mark_notified(self, task_id: int, due_date: datetime | None) -> None:
+        """Mark a task as notified for its current due date.
+        
+        Args:
+            task_id: The task ID that was notified.
+            due_date: The task's due date when the notification was sent.
+        """
+        task_key = str(task_id)
+        self._data[task_key] = due_date.isoformat() if due_date else ""
+    
+    def clear_task(self, task_id: int) -> None:
+        """Remove a task from the notified set.
+        
+        Called when a task is no longer past due (completed, rescheduled, etc.)
+        """
+        task_key = str(task_id)
+        if task_key in self._data:
+            del self._data[task_key]
+    
+    def prune_old_entries(self, current_task_ids: set[int]) -> int:
+        """Remove entries for tasks that no longer exist or are no longer past due.
+        
+        Args:
+            current_task_ids: Set of task IDs currently in past_due lists.
+            
+        Returns:
+            Number of entries pruned.
+        """
+        current_keys = {str(tid) for tid in current_task_ids}
+        old_keys = set(self._data.keys()) - current_keys
+        
+        for key in old_keys:
+            del self._data[key]
+        
+        if old_keys:
+            _LOGGER.debug("Pruned %d stale notification entries", len(old_keys))
+        
+        return len(old_keys)
 
 
 class DonetickTaskCoordinator(DataUpdateCoordinator):
@@ -888,7 +990,7 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         self._cached_task_ids: set[int] = set()  # Track which task IDs are in this list
         self._scheduled_transition_cancel: Optional[Callable] = None  # Cancel callback for scheduled transition
         self._notification_manager: Optional[NotificationManager] = None  # Will be set when hass available
-        self._notified_task_ids: set[int] = set()  # Track tasks we've already notified about
+        self._notification_store: Optional[NotificationStore] = None  # Persistent notification tracking
         
         list_type_name = self.LIST_TYPE_NAMES.get(list_type, list_type.replace("_", " ").title())
         
@@ -960,9 +1062,14 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         """Handle entity being added to Home Assistant."""
         await super().async_added_to_hass()
         
-        # Initialize notification manager for past_due lists
+        # Initialize notification manager and store for past_due lists
         if self._list_type == "past_due":
             self._notification_manager = NotificationManager(self.hass, self._config_entry)
+            self._notification_store = NotificationStore(
+                self.hass, 
+                f"{self._config_entry.entry_id}_{self._member.user_id if self._member else 'unassigned'}"
+            )
+            await self._notification_store.async_load()
             # Check for any tasks already past due and send initial notifications
             await self._check_and_notify_past_due_tasks()
         
@@ -977,10 +1084,13 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
             self._scheduled_transition_cancel()
             self._scheduled_transition_cancel = None
         
-        # Cancel any scheduled reminders for this entity's tasks
+        # Cancel any scheduled reminders for tasks tracked by this entity
         is_unassigned = self._member is None
-        for task_id in list(self._notified_task_ids):
-            NotificationManager.cancel_reminder(task_id, is_unassigned=is_unassigned)
+        if self._notification_store:
+            # Get all task IDs we've been tracking
+            for task_key in list(self._notification_store._data.keys()):
+                task_id = int(task_key)
+                NotificationManager.cancel_reminder(task_id, is_unassigned=is_unassigned)
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -1003,45 +1113,57 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         if not self._notification_manager.is_enabled():
             return
         
+        if not self._notification_store:
+            return
+        
         # Get current filtered tasks (past due tasks for this assignee)
         filtered_tasks = self._filter_tasks(self.coordinator.tasks_list)
         current_task_ids = {task.id for task in filtered_tasks}
         
-        # Find newly past due tasks (not in our notified set)
-        new_past_due = current_task_ids - self._notified_task_ids
-        
-        # Find tasks no longer past due (completed/deleted/rescheduled)
-        resolved_tasks = self._notified_task_ids - current_task_ids
-        
         # Determine if this is an unassigned list
         is_unassigned = self._member is None
         
-        # Cancel reminders for resolved tasks
-        for task_id in resolved_tasks:
+        # Prune stale entries and cancel their reminders
+        stale_task_keys = set(self._notification_store._data.keys()) - {str(tid) for tid in current_task_ids}
+        for task_key in stale_task_keys:
+            task_id = int(task_key)
             NotificationManager.cancel_reminder(task_id, is_unassigned=is_unassigned)
+            self._notification_store.clear_task(task_id)
         
-        # Update our tracking set
-        self._notified_task_ids = current_task_ids.copy()
-        
-        # Send notifications for newly past due tasks
+        # Check each past due task - only notify if we haven't already for this due date
+        notifications_sent = False
         for task in filtered_tasks:
-            if task.id in new_past_due:
-                if is_unassigned:
-                    # For unassigned tasks, notify ALL configured users
-                    sent_count = await self._notification_manager.send_unassigned_past_due_notification(task)
-                    if sent_count > 0:
-                        # Schedule reminder for 24 hours from now
-                        local_now = self._get_local_now()
-                        reminder_time = local_now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
-                        self._notification_manager.schedule_unassigned_reminder(task, reminder_time)
-                else:
-                    # For assigned tasks, notify the specific assignee
-                    sent = await self._notification_manager.send_past_due_notification(task)
-                    if sent:
-                        # Schedule reminder for 24 hours from now
-                        local_now = self._get_local_now()
-                        reminder_time = local_now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
-                        self._notification_manager.schedule_reminder(task, reminder_time)
+            # Check if we already notified for this specific task+due_date combo
+            if self._notification_store.was_notified(task.id, task.next_due_date):
+                continue
+            
+            # This is either a new task or the due date changed - send notification
+            if is_unassigned:
+                # For unassigned tasks, notify ALL configured users
+                sent_count = await self._notification_manager.send_unassigned_past_due_notification(task)
+                if sent_count > 0:
+                    # Schedule reminder for 24 hours from now
+                    local_now = self._get_local_now()
+                    reminder_time = local_now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
+                    self._notification_manager.schedule_unassigned_reminder(task, reminder_time)
+                    # Mark as notified with current due date
+                    self._notification_store.mark_notified(task.id, task.next_due_date)
+                    notifications_sent = True
+            else:
+                # For assigned tasks, notify the specific assignee
+                sent = await self._notification_manager.send_past_due_notification(task)
+                if sent:
+                    # Schedule reminder for 24 hours from now
+                    local_now = self._get_local_now()
+                    reminder_time = local_now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
+                    self._notification_manager.schedule_reminder(task, reminder_time)
+                    # Mark as notified with current due date
+                    self._notification_store.mark_notified(task.id, task.next_due_date)
+                    notifications_sent = True
+        
+        # Persist changes if any notifications were sent or tasks were pruned
+        if notifications_sent or stale_task_keys:
+            await self._notification_store.async_save()
 
     def _schedule_next_transition(self) -> None:
         """Schedule a state update at the next task transition time.

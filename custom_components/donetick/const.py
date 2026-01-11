@@ -1,6 +1,8 @@
 """Constants for the Donetick integration."""
 DOMAIN = "donetick"
 TODO_STORAGE_KEY = f"{DOMAIN}_items"
+NOTIFICATION_STORAGE_KEY = f"{DOMAIN}_notified_tasks"
+NOTIFICATION_STORAGE_VERSION = 1
 
 CONF_URL = "url"
 CONF_TOKEN = "token"  # Legacy API token for eAPI
