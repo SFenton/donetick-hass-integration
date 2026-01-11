@@ -649,16 +649,19 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
                     due_date = due_date + "T23:59:00Z"
         else:
             # Convert datetime object to RFC3339 format
+            # Note: For datetime objects from the picker, we trust whatever time is provided.
+            # We can't distinguish "user picked date only" from "user picked noon".
+            # The 23:59 default only applies to STRING inputs without a time component.
             try:
                 if hasattr(due_date_raw, 'isoformat'):
-                    # Check if it has timezone info
+                    local_tz = zoneinfo.ZoneInfo(hass.config.time_zone)
+                    
                     if hasattr(due_date_raw, 'tzinfo') and due_date_raw.tzinfo is not None:
                         # Already timezone-aware, convert to UTC
                         utc_dt = due_date_raw.astimezone(zoneinfo.ZoneInfo("UTC"))
                         due_date = utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
                     else:
                         # Naive datetime - assume local time
-                        local_tz = zoneinfo.ZoneInfo(hass.config.time_zone)
                         local_dt = due_date_raw.replace(tzinfo=local_tz)
                         utc_dt = local_dt.astimezone(zoneinfo.ZoneInfo("UTC"))
                         due_date = utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")

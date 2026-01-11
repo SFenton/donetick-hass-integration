@@ -888,3 +888,110 @@ class TestCreateTaskFormServiceDueDateHandling:
                 
                 call_kwargs = mock_client.async_create_task.call_args[1]
                 assert call_kwargs["due_date"] is None
+
+    @pytest.mark.asyncio
+    async def test_datetime_object_with_noon_preserved(self, mock_hass):
+        """Test that datetime object with noon time is preserved (not converted to 23:59).
+        
+        We can't distinguish between "user picked date only" (HA defaults to noon) and
+        "user intentionally picked noon", so we must preserve the time as-is.
+        """
+        mock_call = MagicMock()
+        mock_call.data = {
+            "name": "Test Task",
+            "due_date": datetime(2025, 1, 11, 12, 0, 0),  # Noon
+        }
+        
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_task = MagicMock()
+                mock_task.id = 123
+                mock_client.async_create_task = AsyncMock(return_value=mock_task)
+                mock_get_client.return_value = mock_client
+                
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock):
+                    await async_create_task_form_service(mock_hass, mock_call)
+                
+                call_kwargs = mock_client.async_create_task.call_args[1]
+                due_date = call_kwargs["due_date"]
+                assert due_date is not None
+                assert due_date.endswith("Z")
+                # Noon should be preserved
+                parsed = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                local_tz = zoneinfo.ZoneInfo("America/New_York")
+                local_dt = parsed.astimezone(local_tz)
+                assert local_dt.hour == 12
+                assert local_dt.minute == 0
+
+    @pytest.mark.asyncio
+    async def test_datetime_object_with_midnight_preserved(self, mock_hass):
+        """Test that datetime object with midnight time is preserved."""
+        mock_call = MagicMock()
+        mock_call.data = {
+            "name": "Test Task",
+            "due_date": datetime(2025, 1, 11, 0, 0, 0),  # Midnight
+        }
+        
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_task = MagicMock()
+                mock_task.id = 123
+                mock_client.async_create_task = AsyncMock(return_value=mock_task)
+                mock_get_client.return_value = mock_client
+                
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock):
+                    await async_create_task_form_service(mock_hass, mock_call)
+                
+                call_kwargs = mock_client.async_create_task.call_args[1]
+                due_date = call_kwargs["due_date"]
+                assert due_date is not None
+                # Midnight should be preserved
+                parsed = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                local_tz = zoneinfo.ZoneInfo("America/New_York")
+                local_dt = parsed.astimezone(local_tz)
+                assert local_dt.hour == 0
+                assert local_dt.minute == 0
+
+    @pytest.mark.asyncio
+    async def test_datetime_object_with_specific_time_preserved(self, mock_hass):
+        """Test that datetime object with specific time is preserved."""
+        mock_call = MagicMock()
+        mock_call.data = {
+            "name": "Test Task",
+            "due_date": datetime(2025, 1, 11, 15, 30, 0),  # 3:30 PM
+        }
+        
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_task = MagicMock()
+                mock_task.id = 123
+                mock_client.async_create_task = AsyncMock(return_value=mock_task)
+                mock_get_client.return_value = mock_client
+                
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock):
+                    await async_create_task_form_service(mock_hass, mock_call)
+                
+                call_kwargs = mock_client.async_create_task.call_args[1]
+                due_date = call_kwargs["due_date"]
+                assert due_date is not None
+                # Time should be preserved
+                parsed = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                local_tz = zoneinfo.ZoneInfo("America/New_York")
+                local_dt = parsed.astimezone(local_tz)
+                assert local_dt.hour == 15
+                assert local_dt.minute == 30
