@@ -1979,3 +1979,328 @@ class TestDonetickTimeOfDayTasksList:
         # Should be in afternoon (12:00 <= time < 17:00)
         afternoon_entity = self._create_entity_with_mocked_time(mock_coordinator, mock_config_entry, mock_hass, now, "afternoon")
         assert len(afternoon_entity._filter_tasks([task])) == 1
+
+
+class TestGetCompletionUserId:
+    """Tests for _get_completion_user_id method."""
+
+    @pytest.fixture
+    def mock_hass(self):
+        """Create mock Home Assistant instance."""
+        hass = MagicMock()
+        hass.config = MagicMock()
+        hass.config.time_zone = "America/New_York"
+        hass.data = {DOMAIN: {"test_entry_id": {}}}
+        return hass
+
+    @pytest.fixture
+    def mock_config_entry(self):
+        """Create mock config entry."""
+        entry = MagicMock()
+        entry.entry_id = "test_entry_id"
+        entry.data = {
+            CONF_URL: "https://donetick.example.com",
+            CONF_AUTH_TYPE: AUTH_TYPE_JWT,
+        }
+        return entry
+
+    @pytest.fixture
+    def mock_coordinator(self):
+        """Create mock coordinator."""
+        coordinator = MagicMock()
+        coordinator.data = {}
+        coordinator.data_version = 1
+        coordinator.tasks_list = []
+        return coordinator
+
+    @pytest.fixture
+    def mock_client(self):
+        """Create mock API client."""
+        return AsyncMock()
+
+    @pytest.fixture
+    def sample_member(self, sample_circle_member_json):
+        """Create sample member."""
+        return DonetickMember.from_json(sample_circle_member_json)
+
+    @pytest.fixture
+    def sample_todo_item(self):
+        """Create sample TodoItem for testing."""
+        return TodoItem(
+            uid="123--2024-01-15T18:00:00Z",
+            summary="Test Task",
+            status=TodoItemStatus.COMPLETED,
+        )
+
+    @pytest.mark.asyncio
+    async def test_member_specific_list_returns_member_user_id(
+        self, mock_coordinator, mock_config_entry, mock_hass, mock_client, sample_member, sample_todo_item
+    ):
+        """Test that member-specific list returns the member's user_id."""
+        entity = DonetickAssigneeTasksList(mock_coordinator, mock_config_entry, sample_member, mock_hass)
+        
+        result = await entity._get_completion_user_id(mock_client, sample_todo_item)
+        
+        assert result == sample_member.user_id
+
+    @pytest.mark.asyncio
+    async def test_unassigned_list_with_member_none_falls_through(
+        self, mock_coordinator, mock_config_entry, mock_hass, mock_client, sample_chore_json
+    ):
+        """Test that unassigned list (_member=None) looks up task's original assignee."""
+        # Create a task with an assigned user
+        task = DonetickTask.from_json(sample_chore_json)
+        mock_coordinator.data = [task]
+        
+        # Create unassigned date-filtered list (member=None)
+        entity = DonetickDateFilteredTasksList(
+            mock_coordinator, mock_config_entry, mock_hass, "past_due", member=None
+        )
+        
+        # Create item with matching task ID
+        item = TodoItem(
+            uid=f"{task.id}--2024-01-15T18:00:00Z",
+            summary="Test Task",
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        result = await entity._get_completion_user_id(mock_client, item)
+        
+        # Should return the task's original assignee
+        assert result == task.assigned_to
+
+    @pytest.mark.asyncio
+    async def test_unassigned_list_task_without_assignee_returns_none(
+        self, mock_coordinator, mock_config_entry, mock_hass, mock_client, sample_chore_json
+    ):
+        """Test that unassigned list with unassigned task returns None."""
+        # Create a task without an assigned user
+        task_data = sample_chore_json.copy()
+        task_data["assignedTo"] = None
+        task = DonetickTask.from_json(task_data)
+        mock_coordinator.data = [task]
+        
+        # Create unassigned date-filtered list (member=None)
+        entity = DonetickDateFilteredTasksList(
+            mock_coordinator, mock_config_entry, mock_hass, "past_due", member=None
+        )
+        
+        # Create item with matching task ID
+        item = TodoItem(
+            uid=f"{task.id}--2024-01-15T18:00:00Z",
+            summary="Test Task",
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        result = await entity._get_completion_user_id(mock_client, item)
+        
+        # Should return None since task has no assignee
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_all_tasks_list_finds_task_original_assignee(
+        self, mock_coordinator, mock_config_entry, mock_hass, mock_client, sample_chore_json
+    ):
+        """Test that All Tasks list looks up task's original assignee."""
+        task = DonetickTask.from_json(sample_chore_json)
+        mock_coordinator.data = [task]
+        
+        entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
+        
+        item = TodoItem(
+            uid=f"{task.id}--2024-01-15T18:00:00Z",
+            summary="Test Task",
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        result = await entity._get_completion_user_id(mock_client, item)
+        
+        assert result == task.assigned_to
+
+    @pytest.mark.asyncio
+    async def test_all_tasks_list_unassigned_task_returns_none(
+        self, mock_coordinator, mock_config_entry, mock_hass, mock_client, sample_chore_json
+    ):
+        """Test that All Tasks list returns None for unassigned tasks."""
+        task_data = sample_chore_json.copy()
+        task_data["assignedTo"] = None
+        task = DonetickTask.from_json(task_data)
+        mock_coordinator.data = [task]
+        
+        entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
+        
+        item = TodoItem(
+            uid=f"{task.id}--2024-01-15T18:00:00Z",
+            summary="Test Task",
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        result = await entity._get_completion_user_id(mock_client, item)
+        
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_task_not_found_in_coordinator_data_returns_none(
+        self, mock_coordinator, mock_config_entry, mock_hass, mock_client
+    ):
+        """Test that when task is not found in coordinator data, returns None."""
+        mock_coordinator.data = []  # Empty data
+        
+        entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
+        
+        item = TodoItem(
+            uid="999--2024-01-15T18:00:00Z",  # Non-existent task ID
+            summary="Test Task",
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        result = await entity._get_completion_user_id(mock_client, item)
+        
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_coordinator_data_none_returns_none(
+        self, mock_coordinator, mock_config_entry, mock_hass, mock_client
+    ):
+        """Test that when coordinator.data is None, returns None."""
+        mock_coordinator.data = None
+        
+        entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
+        
+        item = TodoItem(
+            uid="123--2024-01-15T18:00:00Z",
+            summary="Test Task",
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        result = await entity._get_completion_user_id(mock_client, item)
+        
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_time_of_day_list_with_member_returns_member_id(
+        self, mock_coordinator, mock_config_entry, mock_hass, mock_client, sample_member
+    ):
+        """Test that time-of-day list with member returns member's user_id."""
+        mock_config_entry.data[CONF_MORNING_CUTOFF] = DEFAULT_MORNING_CUTOFF
+        mock_config_entry.data[CONF_AFTERNOON_CUTOFF] = DEFAULT_AFTERNOON_CUTOFF
+        
+        entity = DonetickTimeOfDayTasksList(
+            mock_coordinator, mock_config_entry, mock_hass, "morning", member=sample_member
+        )
+        
+        item = TodoItem(
+            uid="123--2024-01-15T18:00:00Z",
+            summary="Test Task",
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        result = await entity._get_completion_user_id(mock_client, item)
+        
+        assert result == sample_member.user_id
+
+    @pytest.mark.asyncio
+    async def test_time_of_day_list_without_member_looks_up_task(
+        self, mock_coordinator, mock_config_entry, mock_hass, mock_client, sample_chore_json
+    ):
+        """Test that time-of-day list without member looks up task's assignee."""
+        mock_config_entry.data[CONF_MORNING_CUTOFF] = DEFAULT_MORNING_CUTOFF
+        mock_config_entry.data[CONF_AFTERNOON_CUTOFF] = DEFAULT_AFTERNOON_CUTOFF
+        
+        task = DonetickTask.from_json(sample_chore_json)
+        mock_coordinator.data = [task]
+        
+        entity = DonetickTimeOfDayTasksList(
+            mock_coordinator, mock_config_entry, mock_hass, "morning", member=None
+        )
+        
+        item = TodoItem(
+            uid=f"{task.id}--2024-01-15T18:00:00Z",
+            summary="Test Task",
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        result = await entity._get_completion_user_id(mock_client, item)
+        
+        assert result == task.assigned_to
+
+    @pytest.mark.asyncio
+    async def test_time_of_day_with_unassigned_list_includes_unassigned_tasks(
+        self, mock_coordinator, mock_config_entry, mock_hass, mock_client, sample_member, sample_chore_json
+    ):
+        """Test that TimeOfDayWithUnassigned list with member uses member's ID for completion."""
+        mock_config_entry.data[CONF_MORNING_CUTOFF] = DEFAULT_MORNING_CUTOFF
+        mock_config_entry.data[CONF_AFTERNOON_CUTOFF] = DEFAULT_AFTERNOON_CUTOFF
+        
+        # Even though task might be unassigned, completing from a member's "with unassigned" 
+        # list should use that member's ID
+        entity = DonetickTimeOfDayWithUnassignedList(
+            mock_coordinator, mock_config_entry, mock_hass, "morning", member=sample_member
+        )
+        
+        item = TodoItem(
+            uid="123--2024-01-15T18:00:00Z",
+            summary="Test Task",
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        result = await entity._get_completion_user_id(mock_client, item)
+        
+        assert result == sample_member.user_id
+
+    @pytest.mark.asyncio
+    async def test_multiple_tasks_finds_correct_one(
+        self, mock_coordinator, mock_config_entry, mock_hass, mock_client, sample_chore_json
+    ):
+        """Test that correct task is found when multiple tasks exist."""
+        # Create multiple tasks with different IDs and assignees
+        task1_data = sample_chore_json.copy()
+        task1_data["id"] = 100
+        task1_data["assignedTo"] = 42
+        task1 = DonetickTask.from_json(task1_data)
+        
+        task2_data = sample_chore_json.copy()
+        task2_data["id"] = 200
+        task2_data["assignedTo"] = 99
+        task2 = DonetickTask.from_json(task2_data)
+        
+        task3_data = sample_chore_json.copy()
+        task3_data["id"] = 300
+        task3_data["assignedTo"] = None
+        task3 = DonetickTask.from_json(task3_data)
+        
+        mock_coordinator.data = [task1, task2, task3]
+        
+        entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
+        
+        # Test finding task2
+        item = TodoItem(
+            uid="200--2024-01-15T18:00:00Z",
+            summary="Task 2",
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        result = await entity._get_completion_user_id(mock_client, item)
+        
+        assert result == 99  # task2's assignee
+
+    @pytest.mark.asyncio
+    async def test_uid_parsing_with_complex_date(
+        self, mock_coordinator, mock_config_entry, mock_hass, mock_client, sample_chore_json
+    ):
+        """Test that task ID is correctly parsed from UID with complex date."""
+        task = DonetickTask.from_json(sample_chore_json)
+        mock_coordinator.data = [task]
+        
+        entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
+        
+        # UID with timezone offset
+        item = TodoItem(
+            uid=f"{task.id}--2024-01-15T18:00:00+05:30",
+            summary="Test Task",
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        result = await entity._get_completion_user_id(mock_client, item)
+        
+        assert result == task.assigned_to

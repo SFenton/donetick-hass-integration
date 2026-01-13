@@ -844,6 +844,43 @@ async def async_setup_entry(
                         entity = DonetickTimeOfDayWithUnassignedList(coordinator, config_entry, hass, list_type, member=member)
                         entity._circle_members = circle_members
                         entities.append(entity)
+        
+        # Create "Upcoming Today By Time" lists (tasks due today past next time boundary)
+        _LOGGER.debug("Creating 'Upcoming Today By Time' lists")
+        
+        # Create unassigned Upcoming Today By Time lists
+        entity = DonetickUpcomingTodayByTimeList(coordinator, config_entry, hass, member=None)
+        entity._circle_members = circle_members
+        entities.append(entity)
+        
+        entity = DonetickUpcomingTodayByTimeAndFutureList(coordinator, config_entry, hass, member=None)
+        entity._circle_members = circle_members
+        entities.append(entity)
+        
+        # Create per-member Upcoming Today By Time lists
+        for member in circle_members:
+            if member.is_active:
+                _LOGGER.debug("Creating 'Upcoming Today By Time' lists for member: %s (ID: %d)", member.display_name, member.user_id)
+                
+                entity = DonetickUpcomingTodayByTimeList(coordinator, config_entry, hass, member=member)
+                entity._circle_members = circle_members
+                entities.append(entity)
+                
+                entity = DonetickUpcomingTodayByTimeAndFutureList(coordinator, config_entry, hass, member=member)
+                entity._circle_members = circle_members
+                entities.append(entity)
+                
+                # If include_unassigned is enabled, also create "With Unassigned" variants
+                if include_unassigned:
+                    _LOGGER.debug("Creating 'Upcoming Today By Time With Unassigned' lists for member: %s (ID: %d)", member.display_name, member.user_id)
+                    
+                    entity = DonetickUpcomingTodayByTimeWithUnassignedList(coordinator, config_entry, hass, member=member)
+                    entity._circle_members = circle_members
+                    entities.append(entity)
+                    
+                    entity = DonetickUpcomingTodayByTimeAndFutureWithUnassignedList(coordinator, config_entry, hass, member=member)
+                    entity._circle_members = circle_members
+                    entities.append(entity)
     else:
         _LOGGER.debug("Time-of-day lists not enabled in config")
     
@@ -1053,11 +1090,11 @@ class DonetickTodoListBase(CoordinatorEntity, TodoListEntity):
         
         # Option 1: Context-based completion
         # If this is an assignee-specific list, use that assignee
-        if hasattr(self, '_member'):
+        if hasattr(self, '_member') and self._member is not None:
             _LOGGER.debug("Using assignee from specific list: %s (ID: %d)", self._member.display_name, self._member.user_id)
             return self._member.user_id
         
-        # If completing from "All Tasks", find the task's original assignee
+        # If completing from "All Tasks" or unassigned list, find the task's original assignee
         task_id = int(item.uid.split("--")[0])
         if self.coordinator.data:
             for task in self.coordinator.data:
@@ -2012,6 +2049,412 @@ class DonetickTimeOfDayWithUnassignedList(DonetickTimeOfDayTasksList):
                 # Evening: after afternoon_cutoff but not 23:59 (not all-day, includes past due)
                 if not is_all_day and task_time_minutes >= afternoon_minutes:
                     filtered.append(task)
+        
+        return filtered
+
+
+class DonetickUpcomingTodayByTimeList(DonetickTimeOfDayTasksList):
+    """Donetick Upcoming Today By Time List entity.
+    
+    Shows tasks due TODAY that are past the next time boundary from the current time.
+    - If now is Morning (before morning_cutoff): shows tasks due after morning_cutoff
+    - If now is Afternoon (between cutoffs): shows tasks due after afternoon_cutoff
+    - If now is Evening (after afternoon_cutoff): empty (no next boundary)
+    
+    Excludes:
+    - Past due tasks (due time < now)
+    - All-day tasks (23:59:00)
+    - Tasks not due today
+    """
+
+    def __init__(
+        self, 
+        coordinator: DataUpdateCoordinator, 
+        config_entry: ConfigEntry, 
+        hass: HomeAssistant,
+        member: Optional[DonetickMember] = None
+    ) -> None:
+        """Initialize the Upcoming Today By Time List."""
+        # Pass a dummy list_type to parent, we override filtering
+        super().__init__(coordinator, config_entry, hass, "upcoming_today_by_time", member)
+        
+        if member:
+            self._attr_unique_id = f"dt_{config_entry.entry_id}_{member.user_id}_upcoming_today_by_time"
+            self._attr_name = f"{member.display_name}'s Upcoming Today By Time"
+        else:
+            self._attr_unique_id = f"dt_{config_entry.entry_id}_unassigned_upcoming_today_by_time"
+            self._attr_name = "Unassigned Upcoming Today By Time"
+
+    def _get_next_boundary(self, local_now: datetime) -> Optional[datetime]:
+        """Get the next time boundary based on current time.
+        
+        Returns None if we're in Evening (no next boundary).
+        """
+        morning_cutoff, afternoon_cutoff = self._get_cutoff_times()
+        today_start = self._get_local_today_start()
+        
+        now_minutes = local_now.hour * 60 + local_now.minute
+        morning_minutes = morning_cutoff[0] * 60 + morning_cutoff[1]
+        afternoon_minutes = afternoon_cutoff[0] * 60 + afternoon_cutoff[1]
+        
+        if now_minutes < morning_minutes:
+            # Currently morning - next boundary is morning cutoff
+            return today_start.replace(hour=morning_cutoff[0], minute=morning_cutoff[1], second=0, microsecond=0)
+        elif now_minutes < afternoon_minutes:
+            # Currently afternoon - next boundary is afternoon cutoff
+            return today_start.replace(hour=afternoon_cutoff[0], minute=afternoon_cutoff[1], second=0, microsecond=0)
+        else:
+            # Currently evening - no next boundary
+            return None
+
+    def _filter_tasks(self, tasks):
+        """Filter tasks to show today's tasks past the next time boundary."""
+        local_now = self._get_local_now()
+        today_start = self._get_local_today_start()
+        today_end = self._get_local_today_end()
+        
+        next_boundary = self._get_next_boundary(local_now)
+        
+        # If no next boundary (evening), return empty list
+        if next_boundary is None:
+            return []
+        
+        filtered = []
+        for task in tasks:
+            if not task.is_active:
+                continue
+            
+            # Filter by assignee
+            if self._member:
+                if task.assigned_to != self._member.user_id:
+                    continue
+            else:
+                if task.assigned_to is not None:
+                    continue
+            
+            # Must have a due date
+            if task.next_due_date is None:
+                continue
+            
+            task_due = task.next_due_date
+            if task_due.tzinfo is None:
+                task_due = task_due.replace(tzinfo=ZoneInfo("UTC"))
+            
+            # Convert to local time
+            task_local = task_due.astimezone(ZoneInfo(str(self._hass.config.time_zone)))
+            
+            # Must be due today
+            if not (today_start <= task_due <= today_end):
+                continue
+            
+            # Exclude all-day tasks (23:59:00)
+            if self._is_all_day_task(task_local):
+                continue
+            
+            # Exclude past due tasks
+            if task_due < local_now:
+                continue
+            
+            # Must be past the next boundary
+            if task_due > next_boundary:
+                filtered.append(task)
+        
+        return filtered
+
+    def _calculate_next_transition_time(self) -> Optional[datetime]:
+        """Calculate when the next task will transition into or out of this list."""
+        if self.coordinator.data is None:
+            return None
+        
+        hass = getattr(self, 'hass', None) or self._hass
+        if hass is None:
+            return None
+        
+        local_now = self._get_local_now()
+        today_start = self._get_local_today_start()
+        morning_cutoff, afternoon_cutoff = self._get_cutoff_times()
+        
+        buffer = timedelta(seconds=1)
+        next_times: list[datetime] = []
+        
+        # Schedule at cutoff times for boundary transitions
+        morning_time = today_start.replace(hour=morning_cutoff[0], minute=morning_cutoff[1])
+        afternoon_time = today_start.replace(hour=afternoon_cutoff[0], minute=afternoon_cutoff[1])
+        
+        if morning_time > local_now:
+            next_times.append(morning_time + buffer)
+        if afternoon_time > local_now:
+            next_times.append(afternoon_time + buffer)
+        
+        # Also schedule when tasks become past due (exit the list)
+        next_boundary = self._get_next_boundary(local_now)
+        if next_boundary is not None:
+            for task in self.coordinator.tasks_list:
+                if not task.is_active or task.next_due_date is None:
+                    continue
+                
+                task_due = task.next_due_date
+                if task_due.tzinfo is None:
+                    task_due = task_due.replace(tzinfo=ZoneInfo("UTC"))
+                
+                # Tasks exit when they become past due
+                if task_due > local_now and task_due > next_boundary:
+                    next_times.append(task_due + buffer)
+        
+        if not next_times:
+            return None
+        
+        return min(next_times)
+
+
+class DonetickUpcomingTodayByTimeWithUnassignedList(DonetickUpcomingTodayByTimeList):
+    """Donetick Upcoming Today By Time List that includes unassigned tasks.
+    
+    Creates lists like "Stephen's Upcoming Today By Time With Unassigned".
+    """
+
+    def __init__(
+        self, 
+        coordinator: DataUpdateCoordinator, 
+        config_entry: ConfigEntry, 
+        hass: HomeAssistant,
+        member: DonetickMember
+    ) -> None:
+        """Initialize the Upcoming Today By Time With Unassigned List."""
+        super().__init__(coordinator, config_entry, hass, member)
+        
+        self._attr_unique_id = f"dt_{config_entry.entry_id}_{member.user_id}_upcoming_today_by_time_with_unassigned"
+        self._attr_name = f"{member.display_name}'s Upcoming Today By Time With Unassigned"
+
+    def _filter_tasks(self, tasks):
+        """Filter tasks to include both assignee's tasks and unassigned tasks."""
+        local_now = self._get_local_now()
+        today_start = self._get_local_today_start()
+        today_end = self._get_local_today_end()
+        
+        next_boundary = self._get_next_boundary(local_now)
+        
+        if next_boundary is None:
+            return []
+        
+        filtered = []
+        for task in tasks:
+            if not task.is_active:
+                continue
+            
+            # Include tasks assigned to this member OR unassigned tasks
+            if task.assigned_to is not None and task.assigned_to != self._member.user_id:
+                continue
+            
+            if task.next_due_date is None:
+                continue
+            
+            task_due = task.next_due_date
+            if task_due.tzinfo is None:
+                task_due = task_due.replace(tzinfo=ZoneInfo("UTC"))
+            
+            task_local = task_due.astimezone(ZoneInfo(str(self._hass.config.time_zone)))
+            
+            if not (today_start <= task_due <= today_end):
+                continue
+            
+            if self._is_all_day_task(task_local):
+                continue
+            
+            if task_due < local_now:
+                continue
+            
+            if task_due > next_boundary:
+                filtered.append(task)
+        
+        return filtered
+
+
+class DonetickUpcomingTodayByTimeAndFutureList(DonetickUpcomingTodayByTimeList):
+    """Donetick Upcoming Today By Time And Future List entity.
+    
+    Combines:
+    - Today's tasks past the next time boundary (Upcoming Today By Time logic)
+    - Future tasks within upcoming_days window (existing Upcoming logic)
+    """
+
+    def __init__(
+        self, 
+        coordinator: DataUpdateCoordinator, 
+        config_entry: ConfigEntry, 
+        hass: HomeAssistant,
+        member: Optional[DonetickMember] = None
+    ) -> None:
+        """Initialize the Upcoming Today By Time And Future List."""
+        super().__init__(coordinator, config_entry, hass, member)
+        
+        if member:
+            self._attr_unique_id = f"dt_{config_entry.entry_id}_{member.user_id}_upcoming_today_by_time_and_future"
+            self._attr_name = f"{member.display_name}'s Upcoming Today By Time And Future"
+        else:
+            self._attr_unique_id = f"dt_{config_entry.entry_id}_unassigned_upcoming_today_by_time_and_future"
+            self._attr_name = "Unassigned Upcoming Today By Time And Future"
+
+    def _filter_tasks(self, tasks):
+        """Filter tasks combining today-by-time and future upcoming logic."""
+        local_now = self._get_local_now()
+        today_start = self._get_local_today_start()
+        today_end = self._get_local_today_end()
+        
+        next_boundary = self._get_next_boundary(local_now)
+        
+        # Get upcoming days limit from config
+        upcoming_days = self._config_entry.data.get(CONF_UPCOMING_DAYS, DEFAULT_UPCOMING_DAYS)
+        upcoming_cutoff = today_end + timedelta(days=upcoming_days)
+        
+        filtered = []
+        for task in tasks:
+            if not task.is_active:
+                continue
+            
+            # Filter by assignee
+            if self._member:
+                if task.assigned_to != self._member.user_id:
+                    continue
+            else:
+                if task.assigned_to is not None:
+                    continue
+            
+            if task.next_due_date is None:
+                continue
+            
+            task_due = task.next_due_date
+            if task_due.tzinfo is None:
+                task_due = task_due.replace(tzinfo=ZoneInfo("UTC"))
+            
+            task_local = task_due.astimezone(ZoneInfo(str(self._hass.config.time_zone)))
+            
+            # Case 1: Today's tasks past next boundary (Upcoming Today By Time)
+            if today_start <= task_due <= today_end:
+                # Skip all-day tasks
+                if self._is_all_day_task(task_local):
+                    continue
+                
+                # Skip past due
+                if task_due < local_now:
+                    continue
+                
+                # Include if past next boundary (or if no boundary, skip today's tasks)
+                if next_boundary is not None and task_due > next_boundary:
+                    filtered.append(task)
+            
+            # Case 2: Future tasks (existing Upcoming logic)
+            elif task_due > today_end and task_due <= upcoming_cutoff:
+                # Skip tasks that recur too frequently
+                if _is_frequent_recurrence(task):
+                    continue
+                
+                # Apply advance-days logic for recurring tasks
+                advance_days = _get_recurrence_advance_days(task)
+                if advance_days is None:
+                    # Non-recurring task - always show
+                    filtered.append(task)
+                else:
+                    cutoff_date = local_now + timedelta(days=advance_days)
+                    if task_due <= cutoff_date:
+                        filtered.append(task)
+        
+        return filtered
+
+    def _calculate_next_transition_time(self) -> Optional[datetime]:
+        """Calculate when the next task will transition into or out of this list."""
+        # Use parent's calculation for today transitions
+        parent_next = super()._calculate_next_transition_time()
+        
+        # Also check for midnight transition (future tasks becoming today)
+        local_now = self._get_local_now()
+        tomorrow_start = self._get_local_today_end() + timedelta(seconds=1)
+        
+        next_times = []
+        if parent_next:
+            next_times.append(parent_next)
+        
+        # Schedule at midnight for future task transitions
+        if tomorrow_start > local_now:
+            next_times.append(tomorrow_start)
+        
+        if not next_times:
+            return None
+        
+        return min(next_times)
+
+
+class DonetickUpcomingTodayByTimeAndFutureWithUnassignedList(DonetickUpcomingTodayByTimeAndFutureList):
+    """Donetick Upcoming Today By Time And Future List that includes unassigned tasks.
+    
+    Creates lists like "Stephen's Upcoming Today By Time And Future With Unassigned".
+    """
+
+    def __init__(
+        self, 
+        coordinator: DataUpdateCoordinator, 
+        config_entry: ConfigEntry, 
+        hass: HomeAssistant,
+        member: DonetickMember
+    ) -> None:
+        """Initialize the Upcoming Today By Time And Future With Unassigned List."""
+        super().__init__(coordinator, config_entry, hass, member)
+        
+        self._attr_unique_id = f"dt_{config_entry.entry_id}_{member.user_id}_upcoming_today_by_time_and_future_with_unassigned"
+        self._attr_name = f"{member.display_name}'s Upcoming Today By Time And Future With Unassigned"
+
+    def _filter_tasks(self, tasks):
+        """Filter tasks combining today-by-time and future upcoming logic, including unassigned."""
+        local_now = self._get_local_now()
+        today_start = self._get_local_today_start()
+        today_end = self._get_local_today_end()
+        
+        next_boundary = self._get_next_boundary(local_now)
+        
+        upcoming_days = self._config_entry.data.get(CONF_UPCOMING_DAYS, DEFAULT_UPCOMING_DAYS)
+        upcoming_cutoff = today_end + timedelta(days=upcoming_days)
+        
+        filtered = []
+        for task in tasks:
+            if not task.is_active:
+                continue
+            
+            # Include tasks assigned to this member OR unassigned tasks
+            if task.assigned_to is not None and task.assigned_to != self._member.user_id:
+                continue
+            
+            if task.next_due_date is None:
+                continue
+            
+            task_due = task.next_due_date
+            if task_due.tzinfo is None:
+                task_due = task_due.replace(tzinfo=ZoneInfo("UTC"))
+            
+            task_local = task_due.astimezone(ZoneInfo(str(self._hass.config.time_zone)))
+            
+            # Case 1: Today's tasks past next boundary
+            if today_start <= task_due <= today_end:
+                if self._is_all_day_task(task_local):
+                    continue
+                
+                if task_due < local_now:
+                    continue
+                
+                if next_boundary is not None and task_due > next_boundary:
+                    filtered.append(task)
+            
+            # Case 2: Future tasks
+            elif task_due > today_end and task_due <= upcoming_cutoff:
+                if _is_frequent_recurrence(task):
+                    continue
+                
+                advance_days = _get_recurrence_advance_days(task)
+                if advance_days is None:
+                    filtered.append(task)
+                else:
+                    cutoff_date = local_now + timedelta(days=advance_days)
+                    if task_due <= cutoff_date:
+                        filtered.append(task)
         
         return filtered
 
