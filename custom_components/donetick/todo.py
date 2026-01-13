@@ -1915,20 +1915,20 @@ class DonetickTimeOfDayTasksList(DonetickTodoListBase):
                 if is_past_due:
                     filtered.append(task)
             elif self._list_type == "all_day":
-                # All day: tasks with 23:59:00 time (not yet past due)
-                if is_all_day and not is_past_due:
+                # All day: tasks with 23:59:00 time (includes past due all-day tasks)
+                if is_all_day:
                     filtered.append(task)
             elif self._list_type == "morning":
-                # Morning: before morning_cutoff (not all-day, not past due)
-                if not is_all_day and not is_past_due and task_time_minutes < morning_minutes:
+                # Morning: before morning_cutoff (not all-day, includes past due)
+                if not is_all_day and task_time_minutes < morning_minutes:
                     filtered.append(task)
             elif self._list_type == "afternoon":
-                # Afternoon: between morning and afternoon cutoff (not all-day, not past due)
-                if not is_all_day and not is_past_due and morning_minutes <= task_time_minutes < afternoon_minutes:
+                # Afternoon: between morning and afternoon cutoff (not all-day, includes past due)
+                if not is_all_day and morning_minutes <= task_time_minutes < afternoon_minutes:
                     filtered.append(task)
             elif self._list_type == "evening":
-                # Evening: after afternoon_cutoff but not 23:59 (not all-day, not past due)
-                if not is_all_day and not is_past_due and task_time_minutes >= afternoon_minutes:
+                # Evening: after afternoon_cutoff but not 23:59 (not all-day, includes past due)
+                if not is_all_day and task_time_minutes >= afternoon_minutes:
                     filtered.append(task)
         
         return filtered
@@ -1997,16 +1997,20 @@ class DonetickTimeOfDayWithUnassignedList(DonetickTimeOfDayTasksList):
                 if is_past_due:
                     filtered.append(task)
             elif self._list_type == "all_day":
-                if is_all_day and not is_past_due:
+                # All day: tasks with 23:59:00 time (includes past due all-day tasks)
+                if is_all_day:
                     filtered.append(task)
             elif self._list_type == "morning":
-                if not is_all_day and not is_past_due and task_time_minutes < morning_minutes:
+                # Morning: before morning_cutoff (not all-day, includes past due)
+                if not is_all_day and task_time_minutes < morning_minutes:
                     filtered.append(task)
             elif self._list_type == "afternoon":
-                if not is_all_day and not is_past_due and morning_minutes <= task_time_minutes < afternoon_minutes:
+                # Afternoon: between morning and afternoon cutoff (not all-day, includes past due)
+                if not is_all_day and morning_minutes <= task_time_minutes < afternoon_minutes:
                     filtered.append(task)
             elif self._list_type == "evening":
-                if not is_all_day and not is_past_due and task_time_minutes >= afternoon_minutes:
+                # Evening: after afternoon_cutoff but not 23:59 (not all-day, includes past due)
+                if not is_all_day and task_time_minutes >= afternoon_minutes:
                     filtered.append(task)
         
         return filtered
