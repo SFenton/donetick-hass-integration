@@ -2050,7 +2050,7 @@ class TestGetCompletionUserId:
         """Test that unassigned list (_member=None) looks up task's original assignee."""
         # Create a task with an assigned user
         task = DonetickTask.from_json(sample_chore_json)
-        mock_coordinator.data = [task]
+        mock_coordinator.data = {task.id: task}
         
         # Create unassigned date-filtered list (member=None)
         entity = DonetickDateFilteredTasksList(
@@ -2078,7 +2078,7 @@ class TestGetCompletionUserId:
         task_data = sample_chore_json.copy()
         task_data["assignedTo"] = None
         task = DonetickTask.from_json(task_data)
-        mock_coordinator.data = [task]
+        mock_coordinator.data = {task.id: task}
         
         # Create unassigned date-filtered list (member=None)
         entity = DonetickDateFilteredTasksList(
@@ -2103,7 +2103,7 @@ class TestGetCompletionUserId:
     ):
         """Test that All Tasks list looks up task's original assignee."""
         task = DonetickTask.from_json(sample_chore_json)
-        mock_coordinator.data = [task]
+        mock_coordinator.data = {task.id: task}
         
         entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
         
@@ -2125,7 +2125,7 @@ class TestGetCompletionUserId:
         task_data = sample_chore_json.copy()
         task_data["assignedTo"] = None
         task = DonetickTask.from_json(task_data)
-        mock_coordinator.data = [task]
+        mock_coordinator.data = {task.id: task}
         
         entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
         
@@ -2144,7 +2144,7 @@ class TestGetCompletionUserId:
         self, mock_coordinator, mock_config_entry, mock_hass, mock_client
     ):
         """Test that when task is not found in coordinator data, returns None."""
-        mock_coordinator.data = []  # Empty data
+        mock_coordinator.data = {}  # Empty data
         
         entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
         
@@ -2208,7 +2208,7 @@ class TestGetCompletionUserId:
         mock_config_entry.data[CONF_AFTERNOON_CUTOFF] = DEFAULT_AFTERNOON_CUTOFF
         
         task = DonetickTask.from_json(sample_chore_json)
-        mock_coordinator.data = [task]
+        mock_coordinator.data = {task.id: task}
         
         entity = DonetickTimeOfDayTasksList(
             mock_coordinator, mock_config_entry, mock_hass, "morning", member=None
@@ -2269,7 +2269,7 @@ class TestGetCompletionUserId:
         task3_data["assignedTo"] = None
         task3 = DonetickTask.from_json(task3_data)
         
-        mock_coordinator.data = [task1, task2, task3]
+        mock_coordinator.data = {task1.id: task1, task2.id: task2, task3.id: task3}
         
         entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
         
@@ -2290,7 +2290,7 @@ class TestGetCompletionUserId:
     ):
         """Test that task ID is correctly parsed from UID with complex date."""
         task = DonetickTask.from_json(sample_chore_json)
-        mock_coordinator.data = [task]
+        mock_coordinator.data = {task.id: task}
         
         entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
         

@@ -1097,10 +1097,11 @@ class DonetickTodoListBase(CoordinatorEntity, TodoListEntity):
         # If completing from "All Tasks" or unassigned list, find the task's original assignee
         task_id = int(item.uid.split("--")[0])
         if self.coordinator.data:
-            for task in self.coordinator.data:
-                if task.id == task_id and task.assigned_to:
-                    _LOGGER.debug("Using task's original assignee: %d", task.assigned_to)
-                    return task.assigned_to
+            # coordinator.data is a dict mapping task_id -> task object
+            task = self.coordinator.data.get(task_id)
+            if task and task.assigned_to:
+                _LOGGER.debug("Using task's original assignee: %d", task.assigned_to)
+                return task.assigned_to
         
         # No default user - rely on context-based or task assignee
         
