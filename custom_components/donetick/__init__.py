@@ -104,6 +104,117 @@ def normalize_datetime_string(datetime_str: str, local_tz: zoneinfo.ZoneInfo) ->
             seconds_str = "00"
         
         return f"{date_part}T{hour_str.zfill(2)}:{minute_str.zfill(2)}:{seconds_str.zfill(2)}"
+
+
+def is_time_only_string(time_str: str) -> bool:
+    """Check if the string represents a time-only value (no date component).
+    
+    Matches patterns like:
+    - "14" (just hour, interpreted as 2:00 PM)
+    - "14:30" (HH:MM)
+    - "14:30:00" (HH:MM:SS)
+    - "9:30" (H:MM)
+    - "9:30:00" (H:MM:SS)
+    
+    Does NOT match:
+    - "2025-01-11" (date only - contains dashes)
+    - "2025-01-11T14:30" (datetime - contains T)
+    
+    Args:
+        time_str: The string to check.
+        
+    Returns:
+        True if the string is a time-only value, False otherwise.
+    """
+    if not time_str or not isinstance(time_str, str):
+        return False
+    
+    time_str = time_str.strip()
+    
+    # Must not contain date indicators
+    if 'T' in time_str or '-' in time_str:
+        return False
+    
+    # Check for hour-only (no colons, just a number 0-23)
+    if ':' not in time_str:
+        try:
+            hour = int(time_str)
+            return 0 <= hour <= 23
+        except ValueError:
+            return False
+    
+    # Has colons - parse as HH:MM or HH:MM:SS
+    parts = time_str.split(':')
+    if len(parts) < 2 or len(parts) > 3:
+        return False
+    
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+        if len(parts) == 3:
+            second = int(parts[2])
+            if second < 0 or second > 59:
+                return False
+        
+        return 0 <= hour <= 23 and 0 <= minute <= 59
+    except ValueError:
+        return False
+
+
+def calculate_next_occurrence_for_time(
+    time_str: str, 
+    local_tz: zoneinfo.ZoneInfo,
+    now: datetime | None = None
+) -> str:
+    """Calculate the next occurrence of a time-only value.
+    
+    If the time is in the future today, use today's date.
+    If the time is now or in the past, use tomorrow's date.
+    
+    Examples (assuming local time is 12:00 PM):
+    - "17:00" -> today at 5:00 PM
+    - "17" -> today at 5:00 PM (hour-only)
+    - "12:00" -> tomorrow at 12:00 PM (equal means past)
+    - "09:00" -> tomorrow at 9:00 AM
+    
+    Args:
+        time_str: A time-only string like "14", "14:30", or "14:30:00".
+        local_tz: The local timezone.
+        now: The current time (for testing). If None, uses current time.
+        
+    Returns:
+        An RFC3339 UTC datetime string.
+    """
+    time_str = time_str.strip()
+    
+    # Handle hour-only input (no colons)
+    if ':' not in time_str:
+        hour = int(time_str)
+        minute = 0
+        second = 0
+    else:
+        parts = time_str.split(':')
+        hour = int(parts[0])
+        minute = int(parts[1])
+        second = int(parts[2]) if len(parts) >= 3 else 0
+    
+    if now is None:
+        now = datetime.now(local_tz)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=local_tz)
+    
+    # Create time for today
+    target_time = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
+    
+    # If target time is now or in the past, use tomorrow
+    if target_time <= now:
+        target_time = target_time + timedelta(days=1)
+    
+    # Convert to UTC
+    utc_dt = target_time.astimezone(zoneinfo.ZoneInfo("UTC"))
+    return utc_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 from .webhook import (
     generate_webhook_id,
     get_webhook_url,
@@ -613,8 +724,14 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
             due_date = due_date_raw.strip()
             # Get local timezone for normalization
             local_tz = zoneinfo.ZoneInfo(hass.config.time_zone)
+            
+            # Check for time-only input first (e.g., "17:00" or "14:30:00")
+            if is_time_only_string(due_date):
+                _LOGGER.debug("Detected time-only input: %r, calculating next occurrence", due_date)
+                due_date = calculate_next_occurrence_for_time(due_date, local_tz)
+                _LOGGER.debug("Time-only converted to next occurrence: %r", due_date)
             # If it already has timezone info, use as-is
-            if due_date and (due_date.endswith('Z') or '+' in due_date[-6:]):
+            elif due_date and (due_date.endswith('Z') or '+' in due_date[-6:]):
                 _LOGGER.debug("Due date already has timezone: %r", due_date)
             elif due_date and 'T' in due_date:
                 # No timezone - treat as local time and convert to UTC

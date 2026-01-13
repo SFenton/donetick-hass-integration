@@ -18,6 +18,8 @@ from custom_components.donetick import (
     async_delete_task_service,
     async_create_task_form_service,
     normalize_datetime_string,
+    is_time_only_string,
+    calculate_next_occurrence_for_time,
     _get_api_client,
     _get_config_entry,
     COMPLETE_TASK_SCHEMA,
@@ -995,3 +997,351 @@ class TestCreateTaskFormServiceDueDateHandling:
                 local_dt = parsed.astimezone(local_tz)
                 assert local_dt.hour == 15
                 assert local_dt.minute == 30
+
+
+class TestIsTimeOnlyString:
+    """Tests for is_time_only_string function."""
+
+    def test_valid_hh_mm(self):
+        """Test valid HH:MM format."""
+        assert is_time_only_string("14:30") is True
+        assert is_time_only_string("00:00") is True
+        assert is_time_only_string("23:59") is True
+        assert is_time_only_string("9:30") is True
+
+    def test_valid_hh_mm_ss(self):
+        """Test valid HH:MM:SS format."""
+        assert is_time_only_string("14:30:00") is True
+        assert is_time_only_string("00:00:00") is True
+        assert is_time_only_string("23:59:59") is True
+        assert is_time_only_string("9:30:45") is True
+
+    def test_invalid_datetime(self):
+        """Test datetime strings are not time-only."""
+        assert is_time_only_string("2025-01-11T14:30") is False
+        assert is_time_only_string("2025-01-11T14:30:00") is False
+        assert is_time_only_string("2025-01-11T14:30:00Z") is False
+
+    def test_invalid_date(self):
+        """Test date strings are not time-only."""
+        assert is_time_only_string("2025-01-11") is False
+        assert is_time_only_string("2025-1-11") is False
+
+    def test_valid_hour_only(self):
+        """Test hour-only input is valid (interpreted as HH:00)."""
+        assert is_time_only_string("14") is True  # 2:00 PM
+        assert is_time_only_string("0") is True   # Midnight
+        assert is_time_only_string("23") is True  # 11:00 PM
+        assert is_time_only_string("9") is True   # 9:00 AM
+
+    def test_invalid_hour_only_out_of_range(self):
+        """Test hour-only values out of range."""
+        assert is_time_only_string("24") is False
+        assert is_time_only_string("25") is False
+        assert is_time_only_string("-1") is False
+
+    def test_invalid_out_of_range(self):
+        """Test out of range values."""
+        assert is_time_only_string("24:00") is False
+        assert is_time_only_string("14:60") is False
+        assert is_time_only_string("14:30:60") is False
+        assert is_time_only_string("-1:30") is False
+
+    def test_invalid_empty_and_none(self):
+        """Test empty string and None."""
+        assert is_time_only_string("") is False
+        assert is_time_only_string(None) is False
+
+    def test_invalid_non_numeric(self):
+        """Test non-numeric values."""
+        assert is_time_only_string("ab:cd") is False
+        assert is_time_only_string("14:ab") is False
+
+    def test_with_whitespace(self):
+        """Test time strings with whitespace."""
+        assert is_time_only_string(" 14:30 ") is True
+        assert is_time_only_string("  17:00  ") is True
+
+
+class TestCalculateNextOccurrenceForTime:
+    """Tests for calculate_next_occurrence_for_time function."""
+
+    def test_future_time_today(self):
+        """Test that a future time today returns today's date."""
+        local_tz = zoneinfo.ZoneInfo("America/New_York")
+        # Current time: 12:00 PM
+        now = datetime(2025, 1, 15, 12, 0, 0, tzinfo=local_tz)
+        
+        # 5:00 PM is in the future today
+        result = calculate_next_occurrence_for_time("17:00", local_tz, now=now)
+        
+        # Parse result and check
+        parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+        local_result = parsed.astimezone(local_tz)
+        
+        assert local_result.month == 1
+        assert local_result.day == 15  # Today
+        assert local_result.hour == 17
+        assert local_result.minute == 0
+
+    def test_equal_time_is_tomorrow(self):
+        """Test that equal time (now) returns tomorrow's date."""
+        local_tz = zoneinfo.ZoneInfo("America/New_York")
+        # Current time: exactly 5:00 PM
+        now = datetime(2025, 1, 15, 17, 0, 0, tzinfo=local_tz)
+        
+        # 5:00 PM is equal to now
+        result = calculate_next_occurrence_for_time("17:00", local_tz, now=now)
+        
+        parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+        local_result = parsed.astimezone(local_tz)
+        
+        assert local_result.month == 1
+        assert local_result.day == 16  # Tomorrow
+        assert local_result.hour == 17
+        assert local_result.minute == 0
+
+    def test_past_time_is_tomorrow(self):
+        """Test that a past time returns tomorrow's date."""
+        local_tz = zoneinfo.ZoneInfo("America/New_York")
+        # Current time: 9:00 PM
+        now = datetime(2025, 1, 15, 21, 0, 0, tzinfo=local_tz)
+        
+        # 5:00 PM is in the past today
+        result = calculate_next_occurrence_for_time("17:00", local_tz, now=now)
+        
+        parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+        local_result = parsed.astimezone(local_tz)
+        
+        assert local_result.month == 1
+        assert local_result.day == 16  # Tomorrow
+        assert local_result.hour == 17
+        assert local_result.minute == 0
+
+    def test_with_seconds(self):
+        """Test time with seconds component."""
+        local_tz = zoneinfo.ZoneInfo("America/New_York")
+        now = datetime(2025, 1, 15, 12, 0, 0, tzinfo=local_tz)
+        
+        result = calculate_next_occurrence_for_time("17:30:45", local_tz, now=now)
+        
+        parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+        local_result = parsed.astimezone(local_tz)
+        
+        assert local_result.day == 15  # Today
+        assert local_result.hour == 17
+        assert local_result.minute == 30
+        assert local_result.second == 45
+
+    def test_hour_only_future(self):
+        """Test hour-only input for future time today."""
+        local_tz = zoneinfo.ZoneInfo("America/New_York")
+        now = datetime(2025, 1, 15, 12, 0, 0, tzinfo=local_tz)
+        
+        # "17" means 5:00 PM
+        result = calculate_next_occurrence_for_time("17", local_tz, now=now)
+        
+        parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+        local_result = parsed.astimezone(local_tz)
+        
+        assert local_result.day == 15  # Today
+        assert local_result.hour == 17
+        assert local_result.minute == 0
+        assert local_result.second == 0
+
+    def test_hour_only_past(self):
+        """Test hour-only input for past time goes to tomorrow."""
+        local_tz = zoneinfo.ZoneInfo("America/New_York")
+        now = datetime(2025, 1, 15, 14, 0, 0, tzinfo=local_tz)  # 2:00 PM
+        
+        # "9" means 9:00 AM, which is in the past
+        result = calculate_next_occurrence_for_time("9", local_tz, now=now)
+        
+        parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+        local_result = parsed.astimezone(local_tz)
+        
+        assert local_result.day == 16  # Tomorrow
+        assert local_result.hour == 9
+        assert local_result.minute == 0
+
+    def test_midnight_tomorrow(self):
+        """Test midnight time when current time is afternoon."""
+        local_tz = zoneinfo.ZoneInfo("America/New_York")
+        now = datetime(2025, 1, 15, 14, 0, 0, tzinfo=local_tz)
+        
+        result = calculate_next_occurrence_for_time("00:00", local_tz, now=now)
+        
+        parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+        local_result = parsed.astimezone(local_tz)
+        
+        assert local_result.day == 16  # Tomorrow (midnight is in the past today)
+        assert local_result.hour == 0
+        assert local_result.minute == 0
+
+    def test_different_timezone(self):
+        """Test with a different timezone."""
+        local_tz = zoneinfo.ZoneInfo("Europe/London")
+        now = datetime(2025, 1, 15, 10, 0, 0, tzinfo=local_tz)
+        
+        result = calculate_next_occurrence_for_time("15:00", local_tz, now=now)
+        
+        # Result should be in UTC
+        assert result.endswith("Z")
+        parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+        local_result = parsed.astimezone(local_tz)
+        
+        assert local_result.day == 15  # Today
+        assert local_result.hour == 15
+
+    def test_utc_format_output(self):
+        """Test that output is always in RFC3339 UTC format."""
+        local_tz = zoneinfo.ZoneInfo("America/New_York")
+        now = datetime(2025, 1, 15, 12, 0, 0, tzinfo=local_tz)
+        
+        result = calculate_next_occurrence_for_time("17:00", local_tz, now=now)
+        
+        assert result.endswith("Z")
+        # Should be parseable
+        parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+        assert parsed.tzinfo is not None
+
+
+class TestTimeOnlyIntegration:
+    """Integration tests for time-only due date handling in create_task_form_service."""
+
+    @pytest.fixture
+    def mock_hass(self):
+        """Create a mock Home Assistant instance."""
+        hass = MagicMock()
+        hass.config = MagicMock()
+        hass.config.time_zone = "America/New_York"
+        hass.data = {DOMAIN: {"entries": {}}}
+        return hass
+
+    @pytest.mark.asyncio
+    async def test_time_only_future_today(self, mock_hass):
+        """Test time-only input for future time today."""
+        mock_call = MagicMock()
+        mock_call.data = {
+            "name": "Test Task",
+            "due_date": "17:00",  # 5 PM time-only
+        }
+        
+        local_tz = zoneinfo.ZoneInfo("America/New_York")
+        # Mock current time to 12:00 PM on Jan 15
+        fixed_now = datetime(2025, 1, 15, 12, 0, 0, tzinfo=local_tz)
+        
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_task = MagicMock()
+                mock_task.id = 123
+                mock_client.async_create_task = AsyncMock(return_value=mock_task)
+                mock_get_client.return_value = mock_client
+                
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock):
+                    with patch('custom_components.donetick.datetime') as mock_datetime:
+                        mock_datetime.now.return_value = fixed_now
+                        mock_datetime.fromisoformat = datetime.fromisoformat
+                        mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
+                        await async_create_task_form_service(mock_hass, mock_call)
+                
+                call_kwargs = mock_client.async_create_task.call_args[1]
+                due_date = call_kwargs["due_date"]
+                assert due_date is not None
+                assert due_date.endswith("Z")
+                
+                # Parse and check - should be today 5 PM
+                parsed = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                local_result = parsed.astimezone(local_tz)
+                assert local_result.day == 15  # Today
+                assert local_result.hour == 17
+                assert local_result.minute == 0
+
+    @pytest.mark.asyncio
+    async def test_time_only_past_is_tomorrow(self, mock_hass):
+        """Test time-only input for past time goes to tomorrow."""
+        mock_call = MagicMock()
+        mock_call.data = {
+            "name": "Test Task",
+            "due_date": "17:00",  # 5 PM time-only
+        }
+        
+        local_tz = zoneinfo.ZoneInfo("America/New_York")
+        # Mock current time to 9:00 PM on Jan 15 (5 PM is in the past)
+        fixed_now = datetime(2025, 1, 15, 21, 0, 0, tzinfo=local_tz)
+        
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_task = MagicMock()
+                mock_task.id = 123
+                mock_client.async_create_task = AsyncMock(return_value=mock_task)
+                mock_get_client.return_value = mock_client
+                
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock):
+                    with patch('custom_components.donetick.datetime') as mock_datetime:
+                        mock_datetime.now.return_value = fixed_now
+                        mock_datetime.fromisoformat = datetime.fromisoformat
+                        mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
+                        await async_create_task_form_service(mock_hass, mock_call)
+                
+                call_kwargs = mock_client.async_create_task.call_args[1]
+                due_date = call_kwargs["due_date"]
+                assert due_date is not None
+                
+                parsed = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                local_result = parsed.astimezone(local_tz)
+                assert local_result.day == 16  # Tomorrow
+                assert local_result.hour == 17
+                assert local_result.minute == 0
+
+    @pytest.mark.asyncio
+    async def test_time_only_equal_is_tomorrow(self, mock_hass):
+        """Test time-only input for equal time (now) goes to tomorrow."""
+        mock_call = MagicMock()
+        mock_call.data = {
+            "name": "Test Task",
+            "due_date": "17:00",  # 5 PM time-only
+        }
+        
+        local_tz = zoneinfo.ZoneInfo("America/New_York")
+        # Mock current time to exactly 5:00 PM on Jan 15
+        fixed_now = datetime(2025, 1, 15, 17, 0, 0, tzinfo=local_tz)
+        
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_task = MagicMock()
+                mock_task.id = 123
+                mock_client.async_create_task = AsyncMock(return_value=mock_task)
+                mock_get_client.return_value = mock_client
+                
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock):
+                    with patch('custom_components.donetick.datetime') as mock_datetime:
+                        mock_datetime.now.return_value = fixed_now
+                        mock_datetime.fromisoformat = datetime.fromisoformat
+                        mock_datetime.side_effect = lambda *args, **kw: datetime(*args, **kw)
+                        await async_create_task_form_service(mock_hass, mock_call)
+                
+                call_kwargs = mock_client.async_create_task.call_args[1]
+                due_date = call_kwargs["due_date"]
+                assert due_date is not None
+                
+                parsed = datetime.fromisoformat(due_date.replace("Z", "+00:00"))
+                local_result = parsed.astimezone(local_tz)
+                assert local_result.day == 16  # Tomorrow
+                assert local_result.hour == 17
+                assert local_result.minute == 0
