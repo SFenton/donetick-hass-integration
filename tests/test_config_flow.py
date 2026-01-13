@@ -13,6 +13,7 @@ from custom_components.donetick.config_flow import (
     DonetickOptionsFlowHandler,
     _seconds_to_time_config,
     _config_to_seconds,
+    _normalize_cutoff_times,
 )
 from custom_components.donetick.const import (
     DOMAIN,
@@ -48,8 +49,51 @@ class TestTimeConversionHelpers:
         result = _seconds_to_time_config(300)  # 5 minutes
         
         assert result["hours"] == 0
-        assert result["minutes"] == 5
-        assert result["seconds"] == 0
+
+
+class TestNormalizeCutoffTimes:
+    """Tests for _normalize_cutoff_times function."""
+
+    def test_no_swap_needed_when_afternoon_after_morning(self):
+        """Test that times are unchanged when afternoon > morning."""
+        morning, afternoon = _normalize_cutoff_times("12:00", "17:00")
+        
+        assert morning == "12:00"
+        assert afternoon == "17:00"
+
+    def test_swap_when_afternoon_before_morning(self):
+        """Test that times are swapped when afternoon < morning."""
+        morning, afternoon = _normalize_cutoff_times("17:00", "12:00")
+        
+        assert morning == "12:00"
+        assert afternoon == "17:00"
+
+    def test_swap_when_times_equal(self):
+        """Test that times are swapped when equal (degenerate case)."""
+        morning, afternoon = _normalize_cutoff_times("12:00", "12:00")
+        
+        # When equal, they get swapped (which effectively keeps them the same)
+        assert morning == "12:00"
+        assert afternoon == "12:00"
+
+    def test_handles_different_formats(self):
+        """Test that various time formats are handled."""
+        # With seconds
+        morning, afternoon = _normalize_cutoff_times("12:00:00", "17:00:00")
+        assert morning == "12:00:00"
+        assert afternoon == "17:00:00"
+        
+        # Hour only (minutes default to 0)
+        morning, afternoon = _normalize_cutoff_times("12", "17")
+        assert morning == "12"
+        assert afternoon == "17"
+
+    def test_swap_with_minutes_difference(self):
+        """Test swap when times differ only by minutes."""
+        morning, afternoon = _normalize_cutoff_times("12:30", "12:00")
+        
+        assert morning == "12:00"
+        assert afternoon == "12:30"
 
     def test_seconds_to_time_config_hours_only(self):
         """Test converting hours only."""

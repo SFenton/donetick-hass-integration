@@ -14,6 +14,8 @@ from custom_components.donetick.todo import (
     DonetickAllTasksList,
     DonetickAssigneeTasksList,
     DonetickDateFilteredTasksList,
+    DonetickTimeOfDayTasksList,
+    DonetickTimeOfDayWithUnassignedList,
     _is_frequent_recurrence,
     _get_recurrence_advance_days,
 )
@@ -25,6 +27,10 @@ from custom_components.donetick.const import (
     AUTH_TYPE_JWT,
     CONF_SHOW_DUE_IN,
     CONF_REFRESH_INTERVAL,
+    CONF_MORNING_CUTOFF,
+    CONF_AFTERNOON_CUTOFF,
+    DEFAULT_MORNING_CUTOFF,
+    DEFAULT_AFTERNOON_CUTOFF,
     FREQUENCY_DAILY,
     FREQUENCY_WEEKLY,
     FREQUENCY_INTERVAL,
@@ -1702,3 +1708,274 @@ class TestUpcomingRecurrenceFiltering:
         filtered = entity._filter_tasks([task])
         
         assert len(filtered) == 1
+
+
+class TestDonetickTimeOfDayTasksList:
+    """Tests for DonetickTimeOfDayTasksList entity."""
+
+    @pytest.fixture
+    def mock_hass(self):
+        """Create mock Home Assistant instance."""
+        hass = MagicMock()
+        hass.config.time_zone = "America/New_York"
+        return hass
+
+    @pytest.fixture
+    def mock_config_entry(self):
+        """Create mock config entry with time-of-day cutoffs."""
+        entry = MagicMock()
+        entry.entry_id = "test_entry"
+        entry.data = {
+            CONF_MORNING_CUTOFF: "12:00",  # Morning ends at noon
+            CONF_AFTERNOON_CUTOFF: "17:00",  # Afternoon ends at 5 PM
+        }
+        entry.options = {}
+        return entry
+
+    @pytest.fixture
+    def mock_coordinator(self):
+        """Create mock coordinator."""
+        coordinator = MagicMock()
+        coordinator.data = {}
+        coordinator.data_version = 1
+        coordinator.tasks_list = []
+        return coordinator
+
+    def _create_entity_with_mocked_time(self, coordinator, config_entry, hass, now, list_type="morning"):
+        """Create entity with mocked time."""
+        entity = DonetickTimeOfDayTasksList(coordinator, config_entry, hass, list_type, member=None)
+        entity._get_local_now = lambda: now
+        entity._get_local_today_start = lambda: now.replace(hour=0, minute=0, second=0, microsecond=0)
+        entity._get_local_today_end = lambda: now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return entity
+
+    def test_morning_task_in_morning_list(self, mock_hass, mock_config_entry, mock_coordinator):
+        """Task due at 9 AM should appear in morning list."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 8, 0, 0, tzinfo=tz)  # 8 AM
+        
+        # Task due at 9 AM local time
+        task_data = {
+            "id": 1,
+            "name": "Morning Task",
+            "frequencyType": "once",
+            "frequency": 1,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-15T13:00:00Z",  # 9 AM EDT (UTC-4)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        mock_coordinator.tasks_list = [task]
+        mock_coordinator.data = {1: task}
+        
+        entity = self._create_entity_with_mocked_time(mock_coordinator, mock_config_entry, mock_hass, now, "morning")
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
+        assert filtered[0].id == 1
+
+    def test_afternoon_task_in_afternoon_list(self, mock_hass, mock_config_entry, mock_coordinator):
+        """Task due at 2 PM should appear in afternoon list."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 8, 0, 0, tzinfo=tz)
+        
+        # Task due at 2 PM local time (14:00 EDT = 18:00 UTC)
+        task_data = {
+            "id": 1,
+            "name": "Afternoon Task",
+            "frequencyType": "once",
+            "frequency": 1,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-15T18:00:00Z",  # 2 PM EDT
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        mock_coordinator.tasks_list = [task]
+        mock_coordinator.data = {1: task}
+        
+        entity = self._create_entity_with_mocked_time(mock_coordinator, mock_config_entry, mock_hass, now, "afternoon")
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
+
+    def test_evening_task_in_evening_list(self, mock_hass, mock_config_entry, mock_coordinator):
+        """Task due at 7 PM should appear in evening list."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 8, 0, 0, tzinfo=tz)
+        
+        # Task due at 7 PM local time (19:00 EDT = 23:00 UTC)
+        task_data = {
+            "id": 1,
+            "name": "Evening Task",
+            "frequencyType": "once",
+            "frequency": 1,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-15T23:00:00Z",  # 7 PM EDT
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        mock_coordinator.tasks_list = [task]
+        mock_coordinator.data = {1: task}
+        
+        entity = self._create_entity_with_mocked_time(mock_coordinator, mock_config_entry, mock_hass, now, "evening")
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
+
+    def test_all_day_task_in_all_day_list(self, mock_hass, mock_config_entry, mock_coordinator):
+        """Task due at 23:59:00 (date-only) should appear in all-day list."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 8, 0, 0, tzinfo=tz)
+        
+        # All-day task (23:59:00 local time)
+        # 23:59 EDT = 03:59 next day UTC
+        task_data = {
+            "id": 1,
+            "name": "All Day Task",
+            "frequencyType": "once",
+            "frequency": 1,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-16T03:59:00Z",  # 11:59 PM EDT (next day UTC)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        mock_coordinator.tasks_list = [task]
+        mock_coordinator.data = {1: task}
+        
+        entity = self._create_entity_with_mocked_time(mock_coordinator, mock_config_entry, mock_hass, now, "all_day")
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
+
+    def test_past_due_task_in_past_due_list(self, mock_hass, mock_config_entry, mock_coordinator):
+        """Task that was due earlier today should appear in past_due list."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 14, 0, 0, tzinfo=tz)  # 2 PM
+        
+        # Task was due at 9 AM local time (already past)
+        task_data = {
+            "id": 1,
+            "name": "Past Due Task",
+            "frequencyType": "once",
+            "frequency": 1,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-15T13:00:00Z",  # 9 AM EDT (UTC-4)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        mock_coordinator.tasks_list = [task]
+        mock_coordinator.data = {1: task}
+        
+        entity = self._create_entity_with_mocked_time(mock_coordinator, mock_config_entry, mock_hass, now, "past_due")
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
+
+    def test_past_due_task_not_in_morning_list(self, mock_hass, mock_config_entry, mock_coordinator):
+        """Past due morning task should NOT appear in morning list."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 14, 0, 0, tzinfo=tz)  # 2 PM (past morning)
+        
+        # Task was due at 9 AM local time (past due)
+        task_data = {
+            "id": 1,
+            "name": "Past Due Morning Task",
+            "frequencyType": "once",
+            "frequency": 1,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-15T13:00:00Z",  # 9 AM EDT
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        mock_coordinator.tasks_list = [task]
+        mock_coordinator.data = {1: task}
+        
+        entity = self._create_entity_with_mocked_time(mock_coordinator, mock_config_entry, mock_hass, now, "morning")
+        filtered = entity._filter_tasks([task])
+        
+        # Past due task should NOT be in morning list
+        assert len(filtered) == 0
+
+    def test_task_due_tomorrow_not_in_today_lists(self, mock_hass, mock_config_entry, mock_coordinator):
+        """Task due tomorrow should not appear in any time-of-day lists."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 8, 0, 0, tzinfo=tz)
+        
+        # Task due tomorrow
+        task_data = {
+            "id": 1,
+            "name": "Tomorrow Task",
+            "frequencyType": "once",
+            "frequency": 1,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-16T13:00:00Z",  # Tomorrow
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        mock_coordinator.tasks_list = [task]
+        mock_coordinator.data = {1: task}
+        
+        for list_type in ["past_due", "morning", "afternoon", "evening", "all_day"]:
+            entity = self._create_entity_with_mocked_time(mock_coordinator, mock_config_entry, mock_hass, now, list_type)
+            filtered = entity._filter_tasks([task])
+            assert len(filtered) == 0, f"Task should not appear in {list_type} list"
+
+    def test_assignee_filter(self, mock_hass, mock_config_entry, mock_coordinator):
+        """Tasks should be filtered by assignee."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 8, 0, 0, tzinfo=tz)
+        
+        # Task assigned to user 1
+        task_data = {
+            "id": 1,
+            "name": "Assigned Task",
+            "frequencyType": "once",
+            "frequency": 1,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-15T13:00:00Z",  # 9 AM EDT
+            "isActive": True,
+            "assignedTo": 1,
+        }
+        task = DonetickTask.from_json(task_data)
+        mock_coordinator.tasks_list = [task]
+        mock_coordinator.data = {1: task}
+        
+        # Unassigned list should NOT see this task
+        entity = self._create_entity_with_mocked_time(mock_coordinator, mock_config_entry, mock_hass, now, "morning")
+        filtered = entity._filter_tasks([task])
+        assert len(filtered) == 0
+
+    def test_cutoff_boundary_at_morning(self, mock_hass, mock_config_entry, mock_coordinator):
+        """Task exactly at morning cutoff (12:00) should be in afternoon, not morning."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 8, 0, 0, tzinfo=tz)
+        
+        # Task due exactly at noon (12:00 EDT = 16:00 UTC)
+        task_data = {
+            "id": 1,
+            "name": "Noon Task",
+            "frequencyType": "once",
+            "frequency": 1,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-15T16:00:00Z",  # 12:00 PM EDT
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        mock_coordinator.tasks_list = [task]
+        mock_coordinator.data = {1: task}
+        
+        # Should NOT be in morning (morning is < 12:00)
+        morning_entity = self._create_entity_with_mocked_time(mock_coordinator, mock_config_entry, mock_hass, now, "morning")
+        assert len(morning_entity._filter_tasks([task])) == 0
+        
+        # Should be in afternoon (12:00 <= time < 17:00)
+        afternoon_entity = self._create_entity_with_mocked_time(mock_coordinator, mock_config_entry, mock_hass, now, "afternoon")
+        assert len(afternoon_entity._filter_tasks([task])) == 1

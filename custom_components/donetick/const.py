@@ -74,6 +74,15 @@ MAX_UPCOMING_DAYS = 365
 # Include unassigned tasks in assignee lists
 CONF_INCLUDE_UNASSIGNED = "include_unassigned_in_assignee_lists"
 
+# Time-of-day lists configuration
+CONF_CREATE_TIME_OF_DAY_LISTS = "create_time_of_day_lists"
+CONF_MORNING_CUTOFF = "morning_cutoff"  # Time when morning ends (e.g., "12:00")
+CONF_AFTERNOON_CUTOFF = "afternoon_cutoff"  # Time when afternoon ends (e.g., "17:00")
+
+# Default cutoff times
+DEFAULT_MORNING_CUTOFF = "12:00"
+DEFAULT_AFTERNOON_CUTOFF = "17:00"
+
 # Notification reminder interval (24 hours)
 NOTIFICATION_REMINDER_INTERVAL = 86400  # seconds
 

@@ -36,6 +36,11 @@ from .const import (
     CONF_CREATE_UNIFIED_LIST,
     CONF_CREATE_ASSIGNEE_LISTS,
     CONF_CREATE_DATE_FILTERED_LISTS,
+    CONF_CREATE_TIME_OF_DAY_LISTS,
+    CONF_MORNING_CUTOFF,
+    CONF_AFTERNOON_CUTOFF,
+    DEFAULT_MORNING_CUTOFF,
+    DEFAULT_AFTERNOON_CUTOFF,
     CONF_REFRESH_INTERVAL,
     DEFAULT_REFRESH_INTERVAL,
     CONF_NOTIFY_ON_PAST_DUE,
@@ -810,6 +815,38 @@ async def async_setup_entry(
     else:
         _LOGGER.debug("Date-filtered lists not enabled in config")
     
+    # Create time-of-day sub-lists if enabled
+    create_time_of_day = config_entry.options.get(CONF_CREATE_TIME_OF_DAY_LISTS, config_entry.data.get(CONF_CREATE_TIME_OF_DAY_LISTS, False))
+    
+    if create_time_of_day:
+        _LOGGER.debug("Time-of-day lists enabled in config")
+        
+        # Create global (unassigned) time-of-day lists
+        _LOGGER.debug("Creating global time-of-day lists for unassigned tasks")
+        for list_type in ["past_due", "morning", "afternoon", "evening", "all_day"]:
+            entity = DonetickTimeOfDayTasksList(coordinator, config_entry, hass, list_type, member=None)
+            entity._circle_members = circle_members
+            entities.append(entity)
+        
+        # Create time-of-day lists for each member
+        for member in circle_members:
+            if member.is_active:
+                _LOGGER.debug("Creating time-of-day lists for member: %s (ID: %d)", member.display_name, member.user_id)
+                for list_type in ["past_due", "morning", "afternoon", "evening", "all_day"]:
+                    entity = DonetickTimeOfDayTasksList(coordinator, config_entry, hass, list_type, member=member)
+                    entity._circle_members = circle_members
+                    entities.append(entity)
+                
+                # If include_unassigned is enabled, also create "With Unassigned" lists
+                if include_unassigned:
+                    _LOGGER.debug("Creating time-of-day 'With Unassigned' lists for member: %s (ID: %d)", member.display_name, member.user_id)
+                    for list_type in ["past_due", "morning", "afternoon", "evening", "all_day"]:
+                        entity = DonetickTimeOfDayWithUnassignedList(coordinator, config_entry, hass, list_type, member=member)
+                        entity._circle_members = circle_members
+                        entities.append(entity)
+    else:
+        _LOGGER.debug("Time-of-day lists not enabled in config")
+    
     _LOGGER.debug("Creating %d total entities", len(entities))
     async_add_entities(entities)
 
@@ -1544,10 +1581,23 @@ class DonetickDateFilteredWithUnassignedList(DonetickDateFilteredTasksList):
                 if today_start <= task_due <= today_end and task_due >= local_now:
                     filtered.append(task)
             elif self._list_type == "upcoming":
-                # Exclude daily recurring tasks - no action needed until they're due
+                # Upcoming: incomplete tasks with due date > end of today AND within upcoming_days
+                # But exclude frequent recurrent tasks and apply advance-days logic for others
                 if task_due > today_end and task_due <= upcoming_cutoff:
-                    if task.frequency_type != FREQUENCY_DAILY:
+                    # Skip tasks that recur too frequently (daily, weekly, etc.)
+                    if _is_frequent_recurrence(task):
+                        continue
+                    
+                    # For other recurring tasks, only show within advance window
+                    # Non-recurring tasks return None (always show)
+                    advance_days = _get_recurrence_advance_days(task)
+                    if advance_days is None:
+                        # Non-recurring task - always show in upcoming
                         filtered.append(task)
+                    else:
+                        cutoff_date = local_now + timedelta(days=advance_days)
+                        if task_due <= cutoff_date:
+                            filtered.append(task)
         
         return filtered
 
@@ -1608,6 +1658,358 @@ class DonetickDateFilteredWithUnassignedList(DonetickDateFilteredTasksList):
             return None
         
         return min(next_times)
+
+
+class DonetickTimeOfDayTasksList(DonetickTodoListBase):
+    """Donetick Time-of-Day Tasks List entity (Past Due, Morning, Afternoon, Evening, All Day).
+    
+    These lists show tasks due TODAY, sorted by time-of-day:
+    - Past Due: Tasks due today where due time < now
+    - Morning: Tasks due today before morning_cutoff (not yet past due)
+    - Afternoon: Tasks due today between morning_cutoff and afternoon_cutoff (not yet past due)
+    - Evening: Tasks due today after afternoon_cutoff (not yet past due)
+    - All Day: Tasks due today with time 23:59:00 (date-only tasks, not yet past due)
+    """
+
+    LIST_TYPE_NAMES = {
+        "past_due": "Today Past Due",
+        "morning": "Morning",
+        "afternoon": "Afternoon",
+        "evening": "Evening",
+        "all_day": "All Day",
+    }
+
+    def __init__(
+        self, 
+        coordinator: DataUpdateCoordinator, 
+        config_entry: ConfigEntry, 
+        hass: HomeAssistant,
+        list_type: str,
+        member: Optional[DonetickMember] = None
+    ) -> None:
+        """Initialize the Time-of-Day Tasks List."""
+        super().__init__(coordinator, config_entry, hass)
+        self._list_type = list_type
+        self._member = member
+        self._cached_task_ids: set[int] = set()
+        self._scheduled_transition_cancel: Optional[Callable] = None
+        
+        list_type_name = self.LIST_TYPE_NAMES.get(list_type, list_type.replace("_", " ").title())
+        
+        if member:
+            self._attr_unique_id = f"dt_{config_entry.entry_id}_{member.user_id}_tod_{list_type}"
+            self._attr_name = f"{member.display_name}'s {list_type_name}"
+        else:
+            self._attr_unique_id = f"dt_{config_entry.entry_id}_unassigned_tod_{list_type}"
+            self._attr_name = f"Unassigned {list_type_name}"
+
+    def _parse_cutoff_time(self, cutoff_str: str) -> tuple[int, int]:
+        """Parse a cutoff time string (HH:MM) into hours and minutes."""
+        parts = cutoff_str.split(":")
+        return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+
+    def _get_cutoff_times(self) -> tuple[tuple[int, int], tuple[int, int]]:
+        """Get morning and afternoon cutoff times from config."""
+        morning = self._config_entry.data.get(CONF_MORNING_CUTOFF, DEFAULT_MORNING_CUTOFF)
+        afternoon = self._config_entry.data.get(CONF_AFTERNOON_CUTOFF, DEFAULT_AFTERNOON_CUTOFF)
+        return self._parse_cutoff_time(morning), self._parse_cutoff_time(afternoon)
+
+    def _is_all_day_task(self, task_due: datetime) -> bool:
+        """Check if a task is an all-day task (due at 23:59:00)."""
+        return task_due.hour == 23 and task_due.minute == 59 and task_due.second == 0
+
+    @property
+    def todo_items(self) -> list[TodoItem] | None:
+        """Return todo items with content-based cache invalidation."""
+        if self.coordinator.data is None:
+            return None
+        
+        server_changed = self._cached_data_version != self.coordinator.data_version
+        
+        filtered_tasks = self._filter_tasks(self.coordinator.tasks_list)
+        current_task_ids = {task.id for task in filtered_tasks}
+        
+        time_migration = current_task_ids != self._cached_task_ids
+        
+        if server_changed or time_migration:
+            self._cached_todo_items = [
+                TodoItem(
+                    summary=task.name,
+                    uid="%s--%s" % (task.id, task.next_due_date),
+                    status=self.get_status(task.next_due_date, task.is_active),
+                    due=task.next_due_date,
+                    description=task.description or ""
+                ) for task in filtered_tasks if task.is_active
+            ]
+            
+            old_task_ids = self._cached_task_ids
+            self._cached_task_ids = current_task_ids
+            self._cached_data_version = self.coordinator.data_version
+            
+            if time_migration and not server_changed:
+                added = current_task_ids - old_task_ids
+                removed = old_task_ids - current_task_ids
+                _LOGGER.debug(
+                    "%s: Time-based migration - added %d tasks, removed %d tasks",
+                    self._attr_name, len(added), len(removed)
+                )
+            elif server_changed:
+                _LOGGER.debug(
+                    "%s: Rebuilt due to server changes (version %d, %d items)",
+                    self._attr_name, self.coordinator.data_version, len(self._cached_todo_items)
+                )
+            
+            self._schedule_next_transition()
+        
+        return self._cached_todo_items
+
+    async def async_added_to_hass(self) -> None:
+        """Handle entity being added to Home Assistant."""
+        await super().async_added_to_hass()
+        self._schedule_next_transition()
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Handle entity removal from Home Assistant."""
+        await super().async_will_remove_from_hass()
+        if self._scheduled_transition_cancel:
+            self._scheduled_transition_cancel()
+            self._scheduled_transition_cancel = None
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        super()._handle_coordinator_update()
+        self._schedule_next_transition()
+
+    def _schedule_next_transition(self) -> None:
+        """Schedule a state update at the next task transition time."""
+        hass = getattr(self, 'hass', None) or self._hass
+        if hass is None:
+            return
+        
+        if self._scheduled_transition_cancel:
+            self._scheduled_transition_cancel()
+            self._scheduled_transition_cancel = None
+        
+        next_transition = self._calculate_next_transition_time()
+        if next_transition is None:
+            return
+        
+        _LOGGER.debug(
+            "%s: Scheduling transition at %s",
+            self._attr_name, next_transition.isoformat()
+        )
+        
+        self._scheduled_transition_cancel = async_track_point_in_time(
+            hass,
+            self._handle_transition_callback,
+            next_transition
+        )
+
+    async def _handle_transition_callback(self, now: datetime) -> None:
+        """Handle the scheduled transition callback."""
+        _LOGGER.debug("%s: Transition callback fired at %s", self._attr_name, now.isoformat())
+        self.async_write_ha_state()
+        self._schedule_next_transition()
+
+    def _calculate_next_transition_time(self) -> Optional[datetime]:
+        """Calculate when the next task will transition into or out of this list."""
+        if self.coordinator.data is None:
+            return None
+        
+        hass = getattr(self, 'hass', None) or self._hass
+        if hass is None:
+            return None
+        
+        local_now = self._get_local_now()
+        today_start = self._get_local_today_start()
+        today_end = self._get_local_today_end()
+        morning_cutoff, afternoon_cutoff = self._get_cutoff_times()
+        
+        buffer = timedelta(seconds=1)
+        next_times: list[datetime] = []
+        
+        for task in self.coordinator.tasks_list:
+            if not task.is_active or task.next_due_date is None:
+                continue
+            
+            # Filter by assignee
+            if self._member:
+                if task.assigned_to != self._member.user_id:
+                    continue
+            else:
+                if task.assigned_to is not None:
+                    continue
+            
+            task_due = task.next_due_date
+            if task_due.tzinfo is None:
+                task_due = task_due.replace(tzinfo=ZoneInfo("UTC"))
+            
+            # Only consider tasks due today
+            if not (today_start <= task_due <= today_end):
+                continue
+            
+            # Tasks transition to past_due when their due time passes
+            if task_due > local_now:
+                next_times.append(task_due + buffer)
+        
+        # Also schedule at cutoff times if we have tasks that could transition
+        morning_time = today_start.replace(hour=morning_cutoff[0], minute=morning_cutoff[1])
+        afternoon_time = today_start.replace(hour=afternoon_cutoff[0], minute=afternoon_cutoff[1])
+        
+        if morning_time > local_now:
+            next_times.append(morning_time + buffer)
+        if afternoon_time > local_now:
+            next_times.append(afternoon_time + buffer)
+        
+        if not next_times:
+            return None
+        
+        return min(next_times)
+
+    def _filter_tasks(self, tasks):
+        """Filter tasks based on time-of-day and assignee criteria."""
+        local_now = self._get_local_now()
+        today_start = self._get_local_today_start()
+        today_end = self._get_local_today_end()
+        morning_cutoff, afternoon_cutoff = self._get_cutoff_times()
+        
+        filtered = []
+        for task in tasks:
+            if not task.is_active:
+                continue
+            
+            # Filter by assignee
+            if self._member:
+                if task.assigned_to != self._member.user_id:
+                    continue
+            else:
+                if task.assigned_to is not None:
+                    continue
+            
+            # Must have a due date for time-of-day lists
+            if task.next_due_date is None:
+                continue
+            
+            task_due = task.next_due_date
+            if task_due.tzinfo is None:
+                task_due = task_due.replace(tzinfo=ZoneInfo("UTC"))
+            
+            # Convert to local time for time-of-day comparison
+            task_local = task_due.astimezone(ZoneInfo(str(self._hass.config.time_zone)))
+            
+            # Only include tasks due today
+            if not (today_start <= task_due <= today_end):
+                continue
+            
+            task_hour, task_minute = task_local.hour, task_local.minute
+            task_time_minutes = task_hour * 60 + task_minute
+            morning_minutes = morning_cutoff[0] * 60 + morning_cutoff[1]
+            afternoon_minutes = afternoon_cutoff[0] * 60 + afternoon_cutoff[1]
+            
+            is_all_day = self._is_all_day_task(task_local)
+            is_past_due = task_due < local_now
+            
+            if self._list_type == "past_due":
+                # Past due: tasks due today where due time < now
+                if is_past_due:
+                    filtered.append(task)
+            elif self._list_type == "all_day":
+                # All day: tasks with 23:59:00 time (not yet past due)
+                if is_all_day and not is_past_due:
+                    filtered.append(task)
+            elif self._list_type == "morning":
+                # Morning: before morning_cutoff (not all-day, not past due)
+                if not is_all_day and not is_past_due and task_time_minutes < morning_minutes:
+                    filtered.append(task)
+            elif self._list_type == "afternoon":
+                # Afternoon: between morning and afternoon cutoff (not all-day, not past due)
+                if not is_all_day and not is_past_due and morning_minutes <= task_time_minutes < afternoon_minutes:
+                    filtered.append(task)
+            elif self._list_type == "evening":
+                # Evening: after afternoon_cutoff but not 23:59 (not all-day, not past due)
+                if not is_all_day and not is_past_due and task_time_minutes >= afternoon_minutes:
+                    filtered.append(task)
+        
+        return filtered
+
+
+class DonetickTimeOfDayWithUnassignedList(DonetickTimeOfDayTasksList):
+    """Donetick Time-of-Day Tasks List that includes unassigned tasks.
+    
+    Creates lists like "Stephen's Morning With Unassigned" that show
+    both the assignee's tasks and any unassigned tasks.
+    """
+
+    def __init__(
+        self, 
+        coordinator: DataUpdateCoordinator, 
+        config_entry: ConfigEntry, 
+        hass: HomeAssistant,
+        list_type: str,
+        member: DonetickMember
+    ) -> None:
+        """Initialize the Time-of-Day With Unassigned Tasks List."""
+        super().__init__(coordinator, config_entry, hass, list_type, member)
+        
+        list_type_name = self.LIST_TYPE_NAMES.get(list_type, list_type.replace("_", " ").title())
+        
+        self._attr_unique_id = f"dt_{config_entry.entry_id}_{member.user_id}_tod_{list_type}_with_unassigned"
+        self._attr_name = f"{member.display_name}'s {list_type_name} With Unassigned"
+
+    def _filter_tasks(self, tasks):
+        """Filter tasks to include both assignee's tasks and unassigned tasks."""
+        local_now = self._get_local_now()
+        today_start = self._get_local_today_start()
+        today_end = self._get_local_today_end()
+        morning_cutoff, afternoon_cutoff = self._get_cutoff_times()
+        
+        filtered = []
+        for task in tasks:
+            if not task.is_active:
+                continue
+            
+            # Include tasks assigned to this member OR unassigned tasks
+            if task.assigned_to is not None and task.assigned_to != self._member.user_id:
+                continue
+            
+            if task.next_due_date is None:
+                continue
+            
+            task_due = task.next_due_date
+            if task_due.tzinfo is None:
+                task_due = task_due.replace(tzinfo=ZoneInfo("UTC"))
+            
+            task_local = task_due.astimezone(ZoneInfo(str(self._hass.config.time_zone)))
+            
+            if not (today_start <= task_due <= today_end):
+                continue
+            
+            task_hour, task_minute = task_local.hour, task_local.minute
+            task_time_minutes = task_hour * 60 + task_minute
+            morning_minutes = morning_cutoff[0] * 60 + morning_cutoff[1]
+            afternoon_minutes = afternoon_cutoff[0] * 60 + afternoon_cutoff[1]
+            
+            is_all_day = self._is_all_day_task(task_local)
+            is_past_due = task_due < local_now
+            
+            if self._list_type == "past_due":
+                if is_past_due:
+                    filtered.append(task)
+            elif self._list_type == "all_day":
+                if is_all_day and not is_past_due:
+                    filtered.append(task)
+            elif self._list_type == "morning":
+                if not is_all_day and not is_past_due and task_time_minutes < morning_minutes:
+                    filtered.append(task)
+            elif self._list_type == "afternoon":
+                if not is_all_day and not is_past_due and morning_minutes <= task_time_minutes < afternoon_minutes:
+                    filtered.append(task)
+            elif self._list_type == "evening":
+                if not is_all_day and not is_past_due and task_time_minutes >= afternoon_minutes:
+                    filtered.append(task)
+        
+        return filtered
 
 
 # Keep the old class for backward compatibility

@@ -17,6 +17,8 @@ from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
+    TimeSelector,
+    TimeSelectorConfig,
 )
 
 from .const import (
@@ -41,6 +43,11 @@ from .const import (
     MIN_UPCOMING_DAYS,
     MAX_UPCOMING_DAYS,
     CONF_INCLUDE_UNASSIGNED,
+    CONF_CREATE_TIME_OF_DAY_LISTS,
+    CONF_MORNING_CUTOFF,
+    CONF_AFTERNOON_CUTOFF,
+    DEFAULT_MORNING_CUTOFF,
+    DEFAULT_AFTERNOON_CUTOFF,
 )
 from .api import DonetickApiClient, AuthenticationError
 
@@ -63,6 +70,36 @@ def _config_to_seconds(config: dict[str, int]):
         minutes=config["minutes"],
         seconds=config["seconds"],
     ).total_seconds()
+
+
+def _normalize_cutoff_times(morning: str, afternoon: str) -> tuple[str, str]:
+    """Ensure afternoon cutoff is after morning cutoff. Swap if needed.
+    
+    Args:
+        morning: Morning cutoff time string (HH:MM or HH:MM:SS)
+        afternoon: Afternoon cutoff time string (HH:MM or HH:MM:SS)
+        
+    Returns:
+        Tuple of (morning, afternoon) with values swapped if afternoon <= morning.
+    """
+    # Parse times for comparison
+    def parse_time(t: str) -> tuple[int, int]:
+        parts = t.split(":")
+        return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    
+    m_hour, m_min = parse_time(morning)
+    a_hour, a_min = parse_time(afternoon)
+    
+    # Compare as total minutes
+    m_total = m_hour * 60 + m_min
+    a_total = a_hour * 60 + a_min
+    
+    if a_total <= m_total:
+        # Swap them
+        _LOGGER.debug("Swapping cutoff times: morning=%s, afternoon=%s", afternoon, morning)
+        return afternoon, morning
+    
+    return morning, afternoon
 
 
 class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -215,12 +252,21 @@ class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if (refresh_interval_input := user_input.get(CONF_REFRESH_INTERVAL)) is not None:
                 refresh_interval = _config_to_seconds(refresh_interval_input)
             
+            # Handle time-of-day cutoffs with auto-swap
+            morning_cutoff = user_input.get(CONF_MORNING_CUTOFF, DEFAULT_MORNING_CUTOFF)
+            afternoon_cutoff = user_input.get(CONF_AFTERNOON_CUTOFF, DEFAULT_AFTERNOON_CUTOFF)
+            if user_input.get(CONF_CREATE_TIME_OF_DAY_LISTS, False):
+                morning_cutoff, afternoon_cutoff = _normalize_cutoff_times(morning_cutoff, afternoon_cutoff)
+            
             final_data = {
                 **self._server_data,
                 CONF_SHOW_DUE_IN: user_input.get(CONF_SHOW_DUE_IN, 7),
                 CONF_CREATE_UNIFIED_LIST: user_input.get(CONF_CREATE_UNIFIED_LIST, True),
                 CONF_CREATE_ASSIGNEE_LISTS: user_input.get(CONF_CREATE_ASSIGNEE_LISTS, False),
                 CONF_CREATE_DATE_FILTERED_LISTS: user_input.get(CONF_CREATE_DATE_FILTERED_LISTS, False),
+                CONF_CREATE_TIME_OF_DAY_LISTS: user_input.get(CONF_CREATE_TIME_OF_DAY_LISTS, False),
+                CONF_MORNING_CUTOFF: morning_cutoff,
+                CONF_AFTERNOON_CUTOFF: afternoon_cutoff,
                 CONF_REFRESH_INTERVAL: refresh_interval,
                 CONF_NOTIFY_ON_PAST_DUE: user_input.get(CONF_NOTIFY_ON_PAST_DUE, False),
                 CONF_UPCOMING_DAYS: user_input.get(CONF_UPCOMING_DAYS, DEFAULT_UPCOMING_DAYS),
@@ -244,6 +290,13 @@ class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_CREATE_UNIFIED_LIST, default=True): bool,
                 vol.Optional(CONF_CREATE_ASSIGNEE_LISTS, default=False): bool,
                 vol.Optional(CONF_CREATE_DATE_FILTERED_LISTS, default=False): bool,
+                vol.Optional(CONF_CREATE_TIME_OF_DAY_LISTS, default=False): bool,
+                vol.Optional(CONF_MORNING_CUTOFF, default=DEFAULT_MORNING_CUTOFF): TimeSelector(
+                    TimeSelectorConfig()
+                ),
+                vol.Optional(CONF_AFTERNOON_CUTOFF, default=DEFAULT_AFTERNOON_CUTOFF): TimeSelector(
+                    TimeSelectorConfig()
+                ),
                 vol.Optional(
                     CONF_REFRESH_INTERVAL,
                     default=_seconds_to_time_config(DEFAULT_REFRESH_INTERVAL)
@@ -333,6 +386,12 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
             if (refresh_interval_input := user_input.get(CONF_REFRESH_INTERVAL)) is not None:
                 refresh_interval = _config_to_seconds(refresh_interval_input)
             
+            # Handle time-of-day cutoffs with auto-swap
+            morning_cutoff = user_input.get(CONF_MORNING_CUTOFF, DEFAULT_MORNING_CUTOFF)
+            afternoon_cutoff = user_input.get(CONF_AFTERNOON_CUTOFF, DEFAULT_AFTERNOON_CUTOFF)
+            if user_input.get(CONF_CREATE_TIME_OF_DAY_LISTS, False):
+                morning_cutoff, afternoon_cutoff = _normalize_cutoff_times(morning_cutoff, afternoon_cutoff)
+            
             # Preserve auth credentials from original entry
             data = {
                 CONF_URL: self.entry.data.get(CONF_URL),
@@ -341,6 +400,9 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_CREATE_UNIFIED_LIST: user_input.get(CONF_CREATE_UNIFIED_LIST, True),
                 CONF_CREATE_ASSIGNEE_LISTS: user_input.get(CONF_CREATE_ASSIGNEE_LISTS, False),
                 CONF_CREATE_DATE_FILTERED_LISTS: user_input.get(CONF_CREATE_DATE_FILTERED_LISTS, False),
+                CONF_CREATE_TIME_OF_DAY_LISTS: user_input.get(CONF_CREATE_TIME_OF_DAY_LISTS, False),
+                CONF_MORNING_CUTOFF: morning_cutoff,
+                CONF_AFTERNOON_CUTOFF: afternoon_cutoff,
                 CONF_REFRESH_INTERVAL: refresh_interval,
                 CONF_NOTIFY_ON_PAST_DUE: user_input.get(CONF_NOTIFY_ON_PAST_DUE, False),
                 CONF_UPCOMING_DAYS: user_input.get(CONF_UPCOMING_DAYS, DEFAULT_UPCOMING_DAYS),
@@ -402,6 +464,18 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_CREATE_DATE_FILTERED_LISTS,
                     default=self.entry.data.get(CONF_CREATE_DATE_FILTERED_LISTS, False)
                 ): bool,
+                vol.Optional(
+                    CONF_CREATE_TIME_OF_DAY_LISTS,
+                    default=self.entry.data.get(CONF_CREATE_TIME_OF_DAY_LISTS, False)
+                ): bool,
+                vol.Optional(
+                    CONF_MORNING_CUTOFF,
+                    default=self.entry.data.get(CONF_MORNING_CUTOFF, DEFAULT_MORNING_CUTOFF)
+                ): TimeSelector(TimeSelectorConfig()),
+                vol.Optional(
+                    CONF_AFTERNOON_CUTOFF,
+                    default=self.entry.data.get(CONF_AFTERNOON_CUTOFF, DEFAULT_AFTERNOON_CUTOFF)
+                ): TimeSelector(TimeSelectorConfig()),
                 vol.Optional(
                     CONF_REFRESH_INTERVAL,
                     default=_seconds_to_time_config(
