@@ -49,11 +49,107 @@ from .const import (
     DEFAULT_UPCOMING_DAYS,
     CONF_INCLUDE_UNASSIGNED,
     FREQUENCY_DAILY,
+    FREQUENCY_WEEKLY,
+    FREQUENCY_INTERVAL,
+    FREQUENCY_ONCE,
+    FREQUENCY_NO_REPEAT,
 )
 from .api import DonetickApiClient
 from .model import DonetickTask, DonetickMember
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _is_frequent_recurrence(task: DonetickTask) -> bool:
+    """Check if a task recurs too frequently to show in Upcoming.
+    
+    Returns True if the task should be excluded from Upcoming because it recurs:
+    - Daily (frequency_type="daily")
+    - Custom/interval days with recurrence <= 4
+    
+    Weekly and longer recurrences are allowed but shown with limited advance notice.
+    """
+    freq_type = task.frequency_type
+    freq = task.frequency
+    
+    # Non-recurring tasks are never "frequent recurrence"
+    if freq_type in (FREQUENCY_ONCE, FREQUENCY_NO_REPEAT):
+        return False
+    
+    # Daily recurrence - always exclude
+    if freq_type == FREQUENCY_DAILY:
+        return True
+    
+    # Weekly recurrence - NOT excluded, will be shown with advance window
+    # (handled by _get_recurrence_advance_days)
+    
+    # Custom/interval recurrence based on unit type
+    if freq_type == FREQUENCY_INTERVAL:
+        metadata = task.frequency_metadata or {}
+        unit = metadata.get("unit", "days")
+        
+        # Custom days with recurrence <= 4 - exclude
+        if unit == "days" and freq <= 4:
+            return True
+        
+        # Custom weeks, months, years - NOT excluded (shown with advance window)
+    
+    return False
+
+
+def _get_recurrence_advance_days(task: DonetickTask) -> Optional[int]:
+    """Get the number of days in advance to show a recurring task in Upcoming.
+    
+    Returns min(half of recurrence period rounded down, 7).
+    For non-recurring tasks, returns None (always show).
+    
+    Examples:
+    - 20 days recurrence -> 7 days (min of 10 and 7)
+    - 3 weeks recurrence -> 7 days (min of 10.5 and 7)
+    - 2 weeks recurrence -> 7 days (min of 7 and 7)
+    - 10 days recurrence -> 5 days
+    - 8 days recurrence -> 4 days
+    - 9 days recurrence -> 4 days (floor of 4.5)
+    """
+    freq_type = task.frequency_type
+    freq = task.frequency
+    
+    # Non-recurring tasks - always show in upcoming (no limit)
+    if freq_type in (FREQUENCY_ONCE, FREQUENCY_NO_REPEAT):
+        return None
+    
+    # Calculate recurrence period in days
+    recurrence_days = 0
+    
+    if freq_type == FREQUENCY_DAILY:
+        recurrence_days = freq if freq else 1
+    elif freq_type == FREQUENCY_WEEKLY:
+        recurrence_days = (freq if freq else 1) * 7
+    elif freq_type == FREQUENCY_INTERVAL:
+        metadata = task.frequency_metadata or {}
+        unit = metadata.get("unit", "days")
+        freq_val = freq if freq else 1
+        
+        if unit == "weeks":
+            recurrence_days = freq_val * 7
+        elif unit == "months":
+            recurrence_days = freq_val * 30  # Approximate
+        elif unit == "years":
+            recurrence_days = freq_val * 365  # Approximate
+        else:  # days or unknown
+            recurrence_days = freq_val
+    else:
+        # Other types - default to 7 days
+        return 7
+    
+    # Ensure we don't divide by zero
+    if recurrence_days <= 0:
+        return 7
+    
+    # min(half of recurrence rounded down, 7)
+    half_recurrence = recurrence_days // 2
+    return min(half_recurrence, 7)
+
 
 # Global tracker for notification reminders to prevent duplicates across entities
 # Key: task_id, Value: (cancel_callback, scheduled_time)
@@ -1344,10 +1440,22 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
                     filtered.append(task)
             elif self._list_type == "upcoming":
                 # Upcoming: incomplete tasks with due date > end of today AND within upcoming_days
-                # Exclude daily recurring tasks - no action needed until they're due
+                # But exclude frequent recurrent tasks and apply advance-days logic for others
                 if task_due > today_end and task_due <= upcoming_cutoff:
-                    if task.frequency_type != FREQUENCY_DAILY:
+                    # Skip tasks that recur too frequently (daily, weekly, etc.)
+                    if _is_frequent_recurrence(task):
+                        continue
+                    
+                    # For other recurring tasks, only show within advance window
+                    # Non-recurring tasks return None (always show)
+                    advance_days = _get_recurrence_advance_days(task)
+                    if advance_days is None:
+                        # Non-recurring task - always show in upcoming
                         filtered.append(task)
+                    else:
+                        cutoff_date = local_now + timedelta(days=advance_days)
+                        if task_due <= cutoff_date:
+                            filtered.append(task)
             # no_due_date is handled separately above (doesn't need task_due)
         
         return filtered

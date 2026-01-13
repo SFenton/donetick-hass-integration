@@ -14,6 +14,8 @@ from custom_components.donetick.todo import (
     DonetickAllTasksList,
     DonetickAssigneeTasksList,
     DonetickDateFilteredTasksList,
+    _is_frequent_recurrence,
+    _get_recurrence_advance_days,
 )
 from custom_components.donetick.model import DonetickTask, DonetickMember
 from custom_components.donetick.const import (
@@ -23,6 +25,11 @@ from custom_components.donetick.const import (
     AUTH_TYPE_JWT,
     CONF_SHOW_DUE_IN,
     CONF_REFRESH_INTERVAL,
+    FREQUENCY_DAILY,
+    FREQUENCY_WEEKLY,
+    FREQUENCY_INTERVAL,
+    FREQUENCY_ONCE,
+    FREQUENCY_NO_REPEAT,
 )
 
 from homeassistant.components.todo import TodoItem, TodoItemStatus
@@ -437,9 +444,12 @@ class TestDonetickDateFilteredTasksList:
         
     def test_time_migration_due_today_to_past_due(self, mock_config_entry, mock_hass):
         """Test task migrates from due_today to past_due when time passes."""
-        # Create a task due in 1 hour
-        now = datetime.now(ZoneInfo("America/New_York"))
-        due_soon = now + timedelta(hours=1)
+        tz = ZoneInfo("America/New_York")
+        # Fixed time: 2024-06-15 at 10:00 AM
+        now = datetime(2024, 6, 15, 10, 0, 0, tzinfo=tz)
+        
+        # Task due at 11:00 AM today (in 1 hour)
+        due_soon = datetime(2024, 6, 15, 11, 0, 0, tzinfo=tz)
         task_data = {
             "id": 1,
             "name": "Test Task",
@@ -455,21 +465,24 @@ class TestDonetickDateFilteredTasksList:
         coordinator.data_version = 1
         coordinator.tasks_list = [task]
         
-        # Create due_today entity
+        # Create due_today entity with mocked time
         entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "due_today")
+        entity._get_local_now = lambda: now
+        entity._get_local_today_start = lambda: now.replace(hour=0, minute=0, second=0, microsecond=0)
+        entity._get_local_today_end = lambda: now.replace(hour=23, minute=59, second=59, microsecond=999999)
         
-        # Initially, task should be in due_today
+        # Initially, task should be in due_today (due at 11 AM, now is 10 AM)
         items = entity.todo_items
         assert len(items) == 1
         
-        # Simulate time passing - task now past due
-        past = now - timedelta(hours=1)
-        task_data["nextDueDate"] = past.isoformat()
-        task = DonetickTask.from_json(task_data)
-        coordinator.tasks_list = [task]
-        coordinator.data = {1: task}
+        # Simulate time passing - now it's 12:00, task is past due
+        later = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        entity._get_local_now = lambda: later
+        entity._get_local_today_start = lambda: later.replace(hour=0, minute=0, second=0, microsecond=0)
+        entity._get_local_today_end = lambda: later.replace(hour=23, minute=59, second=59, microsecond=999999)
+        entity._cached_todo_items = None  # Force rebuild
         
-        # Now check due_today - task should have migrated out
+        # Now check due_today - task should have migrated out (it's past due now)
         items = entity.todo_items
         assert len(items) == 0
 
@@ -573,9 +586,12 @@ class TestScheduledTransitions:
 
     def test_calculate_transition_past_due_entry(self, mock_config_entry, mock_hass):
         """Test calculation of when task enters past_due list."""
-        # Create a task due in 2 hours (currently in due_today)
-        now = datetime.now(ZoneInfo("America/New_York"))
-        due_time = now + timedelta(hours=2)
+        tz = ZoneInfo("America/New_York")
+        # Fixed time: 2024-06-15 at 10:00 AM
+        now = datetime(2024, 6, 15, 10, 0, 0, tzinfo=tz)
+        
+        # Task due at 12:00 PM today (in 2 hours) - currently in due_today
+        due_time = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
         task_data = {
             "id": 1,
             "name": "Test Task",
@@ -592,20 +608,28 @@ class TestScheduledTransitions:
         coordinator.tasks_list = [task]
         
         entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "past_due")
+        entity._get_local_now = lambda: now
+        entity._get_local_today_start = lambda: now.replace(hour=0, minute=0, second=0, microsecond=0)
+        entity._get_local_today_end = lambda: now.replace(hour=23, minute=59, second=59, microsecond=999999)
         
         # Calculate next transition
         next_transition = entity._calculate_next_transition_time()
         
-        # Should be approximately 2 hours from now (when task becomes past due)
+        # Should be approximately due_time + 1 second buffer (when task becomes past due)
         assert next_transition is not None
-        # Allow 5 second buffer for test execution time
-        time_diff = (next_transition - due_time).total_seconds()
-        assert 0 <= time_diff <= 5  # 1 second buffer + tolerance
+        # The method adds 1 second buffer
+        expected = due_time + timedelta(seconds=1)
+        time_diff = abs((next_transition - expected).total_seconds())
+        assert time_diff <= 1  # Within 1 second tolerance
 
     def test_calculate_transition_due_today_exit(self, mock_config_entry, mock_hass):
         """Test calculation of when task exits due_today (becomes past_due)."""
-        now = datetime.now(ZoneInfo("America/New_York"))
-        due_time = now + timedelta(hours=3)
+        tz = ZoneInfo("America/New_York")
+        # Fixed time: 2024-06-15 at 10:00 AM
+        now = datetime(2024, 6, 15, 10, 0, 0, tzinfo=tz)
+        
+        # Task due at 1:00 PM today (in 3 hours)
+        due_time = datetime(2024, 6, 15, 13, 0, 0, tzinfo=tz)
         task_data = {
             "id": 1,
             "name": "Test Task",
@@ -622,13 +646,17 @@ class TestScheduledTransitions:
         coordinator.tasks_list = [task]
         
         entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "due_today")
+        entity._get_local_now = lambda: now
+        entity._get_local_today_start = lambda: now.replace(hour=0, minute=0, second=0, microsecond=0)
+        entity._get_local_today_end = lambda: now.replace(hour=23, minute=59, second=59, microsecond=999999)
         
         next_transition = entity._calculate_next_transition_time()
         
-        # Should be when task becomes past due (due_time)
+        # Should be when task becomes past due (due_time + 1 second buffer)
         assert next_transition is not None
-        time_diff = (next_transition - due_time).total_seconds()
-        assert 0 <= time_diff <= 5
+        expected = due_time + timedelta(seconds=1)
+        time_diff = abs((next_transition - expected).total_seconds())
+        assert time_diff <= 1
 
     def test_calculate_transition_upcoming_exit(self, mock_config_entry, mock_hass):
         """Test calculation of when task exits upcoming (becomes due_today at midnight)."""
@@ -678,23 +706,27 @@ class TestScheduledTransitions:
 
     def test_calculate_transition_multiple_tasks_picks_earliest(self, mock_config_entry, mock_hass):
         """Test that the earliest transition time is chosen when multiple tasks exist."""
-        now = datetime.now(ZoneInfo("America/New_York"))
+        tz = ZoneInfo("America/New_York")
+        # Fixed time: 2024-06-15 at 10:00 AM
+        now = datetime(2024, 6, 15, 10, 0, 0, tzinfo=tz)
         
-        # Task due in 1 hour
+        # Task due at 11:00 AM (in 1 hour)
+        task1_due = datetime(2024, 6, 15, 11, 0, 0, tzinfo=tz)
         task1_data = {
             "id": 1,
             "name": "Task 1",
             "frequencyType": "once",
-            "nextDueDate": (now + timedelta(hours=1)).isoformat(),
+            "nextDueDate": task1_due.isoformat(),
             "isActive": True,
             "assignedTo": None,
         }
-        # Task due in 3 hours
+        # Task due at 1:00 PM (in 3 hours)
+        task2_due = datetime(2024, 6, 15, 13, 0, 0, tzinfo=tz)
         task2_data = {
             "id": 2,
             "name": "Task 2",
             "frequencyType": "once",
-            "nextDueDate": (now + timedelta(hours=3)).isoformat(),
+            "nextDueDate": task2_due.isoformat(),
             "isActive": True,
             "assignedTo": None,
         }
@@ -707,14 +739,17 @@ class TestScheduledTransitions:
         coordinator.tasks_list = [task1, task2]
         
         entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "past_due")
+        entity._get_local_now = lambda: now
+        entity._get_local_today_start = lambda: now.replace(hour=0, minute=0, second=0, microsecond=0)
+        entity._get_local_today_end = lambda: now.replace(hour=23, minute=59, second=59, microsecond=999999)
         
         next_transition = entity._calculate_next_transition_time()
         
-        # Should pick task1's due time (earlier)
-        expected = now + timedelta(hours=1)
+        # Should pick task1's due time (earlier) + 1 second buffer
+        expected = task1_due + timedelta(seconds=1)
         assert next_transition is not None
-        time_diff = (next_transition - expected).total_seconds()
-        assert 0 <= time_diff <= 5
+        time_diff = abs((next_transition - expected).total_seconds())
+        assert time_diff <= 1
 
     def test_schedule_transition_called_on_server_change(self, mock_config_entry, mock_hass):
         """Test that _schedule_next_transition is called when server data changes."""
@@ -785,23 +820,27 @@ class TestScheduledTransitions:
 
     def test_transition_filters_by_assignee(self, mock_config_entry, mock_hass):
         """Test that transition calculation respects assignee filtering."""
-        now = datetime.now(ZoneInfo("America/New_York"))
+        tz = ZoneInfo("America/New_York")
+        # Fixed time: 2024-06-15 at 10:00 AM
+        now = datetime(2024, 6, 15, 10, 0, 0, tzinfo=tz)
         
-        # Task assigned to user 1
+        # Task assigned to user 1, due at 12:00 PM (in 2 hours)
+        task1_due = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
         task1_data = {
             "id": 1,
             "name": "Task 1",
             "frequencyType": "once",
-            "nextDueDate": (now + timedelta(hours=2)).isoformat(),
+            "nextDueDate": task1_due.isoformat(),
             "isActive": True,
             "assignedTo": 1,
         }
-        # Unassigned task
+        # Unassigned task, due at 11:00 AM (in 1 hour)
+        task2_due = datetime(2024, 6, 15, 11, 0, 0, tzinfo=tz)
         task2_data = {
             "id": 2,
             "name": "Task 2",
             "frequencyType": "once",
-            "nextDueDate": (now + timedelta(hours=1)).isoformat(),
+            "nextDueDate": task2_due.isoformat(),
             "isActive": True,
             "assignedTo": None,
         }
@@ -815,14 +854,17 @@ class TestScheduledTransitions:
         
         # Create entity for unassigned tasks
         entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "past_due")
+        entity._get_local_now = lambda: now
+        entity._get_local_today_start = lambda: now.replace(hour=0, minute=0, second=0, microsecond=0)
+        entity._get_local_today_end = lambda: now.replace(hour=23, minute=59, second=59, microsecond=999999)
         
         next_transition = entity._calculate_next_transition_time()
         
-        # Should only consider task2 (unassigned), due in 1 hour
-        expected = now + timedelta(hours=1)
+        # Should only consider task2 (unassigned), due at 11:00 AM + 1 second buffer
+        expected = task2_due + timedelta(seconds=1)
         assert next_transition is not None
-        time_diff = (next_transition - expected).total_seconds()
-        assert 0 <= time_diff <= 5
+        time_diff = abs((next_transition - expected).total_seconds())
+        assert time_diff <= 1
 
     @pytest.mark.asyncio
     async def test_async_added_to_hass_schedules_transition(self, mock_config_entry, mock_hass):
@@ -956,3 +998,707 @@ class TestScheduledTransitions:
         next_transition = entity._calculate_next_transition_time()
         
         assert next_transition is None
+
+
+# =============================================================================
+# Tests for Recurrence Filtering Helper Functions
+# =============================================================================
+
+class TestIsFrequentRecurrence:
+    """Tests for the _is_frequent_recurrence helper function."""
+
+    def test_daily_recurrence_is_frequent(self):
+        """Daily recurrence should be considered frequent."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_DAILY
+        task.frequency = 1
+        task.frequency_metadata = None
+        
+        assert _is_frequent_recurrence(task) is True
+
+    def test_weekly_recurrence_is_not_frequent(self):
+        """Weekly recurrence should NOT be considered frequent (shown with advance window)."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_WEEKLY
+        task.frequency = 1
+        task.frequency_metadata = None
+        
+        assert _is_frequent_recurrence(task) is False
+
+    def test_interval_days_1_is_frequent(self):
+        """Custom interval of 1 day should be frequent."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 1
+        task.frequency_metadata = {"unit": "days"}
+        
+        assert _is_frequent_recurrence(task) is True
+
+    def test_interval_days_4_is_frequent(self):
+        """Custom interval of 4 days should be frequent."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 4
+        task.frequency_metadata = {"unit": "days"}
+        
+        assert _is_frequent_recurrence(task) is True
+
+    def test_interval_days_5_is_not_frequent(self):
+        """Custom interval of 5 days should NOT be frequent."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 5
+        task.frequency_metadata = {"unit": "days"}
+        
+        assert _is_frequent_recurrence(task) is False
+
+    def test_interval_days_10_is_not_frequent(self):
+        """Custom interval of 10 days should NOT be frequent."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 10
+        task.frequency_metadata = {"unit": "days"}
+        
+        assert _is_frequent_recurrence(task) is False
+
+    def test_interval_weeks_1_is_not_frequent(self):
+        """Custom interval of 1 week should NOT be frequent (shown with advance window)."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 1
+        task.frequency_metadata = {"unit": "weeks"}
+        
+        assert _is_frequent_recurrence(task) is False
+
+    def test_interval_weeks_2_is_not_frequent(self):
+        """Custom interval of 2 weeks should NOT be frequent."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 2
+        task.frequency_metadata = {"unit": "weeks"}
+        
+        assert _is_frequent_recurrence(task) is False
+
+    def test_interval_weeks_3_is_not_frequent(self):
+        """Custom interval of 3 weeks should NOT be frequent."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 3
+        task.frequency_metadata = {"unit": "weeks"}
+        
+        assert _is_frequent_recurrence(task) is False
+
+    def test_interval_months_1_is_not_frequent(self):
+        """Custom interval of 1 month should NOT be frequent."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 1
+        task.frequency_metadata = {"unit": "months"}
+        
+        assert _is_frequent_recurrence(task) is False
+
+    def test_interval_months_6_is_not_frequent(self):
+        """Custom interval of 6 months should NOT be frequent."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 6
+        task.frequency_metadata = {"unit": "months"}
+        
+        assert _is_frequent_recurrence(task) is False
+
+    def test_interval_years_1_is_not_frequent(self):
+        """Custom interval of 1 year should NOT be frequent."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 1
+        task.frequency_metadata = {"unit": "years"}
+        
+        assert _is_frequent_recurrence(task) is False
+
+    def test_once_is_not_frequent(self):
+        """One-time tasks should NOT be frequent."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_ONCE
+        task.frequency = None
+        task.frequency_metadata = None
+        
+        assert _is_frequent_recurrence(task) is False
+
+    def test_no_repeat_is_not_frequent(self):
+        """No-repeat tasks should NOT be frequent."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_NO_REPEAT
+        task.frequency = None
+        task.frequency_metadata = None
+        
+        assert _is_frequent_recurrence(task) is False
+
+    def test_interval_missing_metadata_is_not_frequent(self):
+        """Interval with missing metadata (defaults to days) should NOT be frequent when freq > 4."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 10  # > 4, so not frequent even defaulting to days
+        task.frequency_metadata = None
+        
+        assert _is_frequent_recurrence(task) is False
+
+    def test_interval_empty_metadata_is_not_frequent(self):
+        """Interval with empty metadata (defaults to days) should NOT be frequent when freq > 4."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 10  # > 4, so not frequent even defaulting to days
+        task.frequency_metadata = {}
+        
+        assert _is_frequent_recurrence(task) is False
+
+    def test_interval_unknown_unit_is_not_frequent(self):
+        """Interval with unknown unit should NOT be frequent."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 2
+        task.frequency_metadata = {"unit": "unknown"}
+        
+        assert _is_frequent_recurrence(task) is False
+
+
+class TestGetRecurrenceAdvanceDays:
+    """Tests for the _get_recurrence_advance_days helper function."""
+
+    def test_once_returns_none(self):
+        """One-time tasks should return None (no advance limit)."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_ONCE
+        task.frequency = None
+        task.frequency_metadata = None
+        
+        assert _get_recurrence_advance_days(task) is None
+
+    def test_no_repeat_returns_none(self):
+        """No-repeat tasks should return None (no advance limit)."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_NO_REPEAT
+        task.frequency = None
+        task.frequency_metadata = None
+        
+        assert _get_recurrence_advance_days(task) is None
+
+    def test_interval_10_days_returns_5(self):
+        """10 days recurrence → 5 days advance (half of 10)."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 10
+        task.frequency_metadata = {"unit": "days"}
+        
+        assert _get_recurrence_advance_days(task) == 5
+
+    def test_interval_8_days_returns_4(self):
+        """8 days recurrence → 4 days advance (half of 8)."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 8
+        task.frequency_metadata = {"unit": "days"}
+        
+        assert _get_recurrence_advance_days(task) == 4
+
+    def test_interval_9_days_returns_4(self):
+        """9 days recurrence → 4 days advance (floor of 4.5)."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 9
+        task.frequency_metadata = {"unit": "days"}
+        
+        assert _get_recurrence_advance_days(task) == 4
+
+    def test_interval_20_days_returns_7(self):
+        """20 days recurrence → 7 days advance (min of 10, 7)."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 20
+        task.frequency_metadata = {"unit": "days"}
+        
+        assert _get_recurrence_advance_days(task) == 7
+
+    def test_interval_2_weeks_returns_7(self):
+        """2 weeks (14 days) → 7 days advance (min of 7, 7)."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 2
+        task.frequency_metadata = {"unit": "weeks"}
+        
+        assert _get_recurrence_advance_days(task) == 7
+
+    def test_interval_3_weeks_returns_7(self):
+        """3 weeks (21 days) → 7 days advance (min of 10.5, 7)."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 3
+        task.frequency_metadata = {"unit": "weeks"}
+        
+        assert _get_recurrence_advance_days(task) == 7
+
+    def test_interval_1_month_returns_7(self):
+        """1 month (30 days) → 7 days advance (min of 15, 7)."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 1
+        task.frequency_metadata = {"unit": "months"}
+        
+        assert _get_recurrence_advance_days(task) == 7
+
+    def test_interval_6_months_returns_7(self):
+        """6 months (180 days) → 7 days advance."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 6
+        task.frequency_metadata = {"unit": "months"}
+        
+        assert _get_recurrence_advance_days(task) == 7
+
+    def test_interval_1_year_returns_7(self):
+        """1 year (365 days) → 7 days advance."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 1
+        task.frequency_metadata = {"unit": "years"}
+        
+        assert _get_recurrence_advance_days(task) == 7
+
+    def test_interval_missing_metadata_returns_5(self):
+        """Missing metadata defaults to days unit, so 10 days -> 5 days advance."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 10
+        task.frequency_metadata = None
+        
+        assert _get_recurrence_advance_days(task) == 5
+
+    def test_interval_unknown_unit_returns_5(self):
+        """Unknown unit defaults to days, so 10 days -> 5 days advance."""
+        task = MagicMock()
+        task.frequency_type = FREQUENCY_INTERVAL
+        task.frequency = 10
+        task.frequency_metadata = {"unit": "unknown"}
+        
+        assert _get_recurrence_advance_days(task) == 5
+
+
+class TestUpcomingRecurrenceFiltering:
+    """Integration tests for upcoming list recurrence filtering.
+    
+    These tests mock the entity's time methods directly to control time.
+    """
+
+    def _create_entity_with_mocked_time(self, coordinator, config_entry, hass, now):
+        """Create an entity with mocked time methods."""
+        entity = DonetickDateFilteredTasksList(coordinator, config_entry, hass, "upcoming")
+        # Mock the time methods on the entity instance
+        entity._get_local_now = lambda: now
+        entity._get_local_today_start = lambda: now.replace(hour=0, minute=0, second=0, microsecond=0)
+        entity._get_local_today_end = lambda: now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return entity
+
+    def test_daily_task_excluded_from_upcoming(self, mock_hass, mock_config_entry):
+        """Daily recurring tasks should be excluded from upcoming list."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "Daily Task",
+            "frequencyType": "daily",
+            "frequency": 1,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-16T10:00:00Z",  # Tomorrow
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 0
+
+    def test_weekly_task_hidden_beyond_3_days(self, mock_hass, mock_config_entry):
+        """Weekly recurring tasks should be hidden when more than 3 days from due date."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "Weekly Task",
+            "frequencyType": "weekly",
+            "frequency": 1,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-20T10:00:00Z",  # 5 days from now (beyond 3-day window)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 0
+
+    def test_interval_1_week_hidden_beyond_3_days(self, mock_hass, mock_config_entry):
+        """Custom interval of 1 week should be hidden when more than 3 days from due date."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "Weekly Interval Task",
+            "frequencyType": "interval",
+            "frequency": 1,
+            "frequencyMetadata": {"unit": "weeks"},
+            "nextDueDate": "2024-06-20T10:00:00Z",  # 5 days from now (beyond 3-day window)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 0
+
+    def test_weekly_task_shown_within_3_days(self, mock_hass, mock_config_entry):
+        """Weekly task should be shown when within 3 days of due date."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "Weekly Task",
+            "frequencyType": "weekly",
+            "frequency": 1,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-18T10:00:00Z",  # 3 days from now (within 3-day window)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
+
+    def test_interval_1_week_shown_within_3_days(self, mock_hass, mock_config_entry):
+        """Custom interval of 1 week should be shown when within 3 days of due date."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "Weekly Interval Task",
+            "frequencyType": "interval",
+            "frequency": 1,
+            "frequencyMetadata": {"unit": "weeks"},
+            "nextDueDate": "2024-06-17T10:00:00Z",  # 2 days from now (within 3-day window)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
+
+    def test_interval_4_days_excluded_from_upcoming(self, mock_hass, mock_config_entry):
+        """Custom interval of 4 days should be excluded from upcoming list."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "4-Day Interval Task",
+            "frequencyType": "interval",
+            "frequency": 4,
+            "frequencyMetadata": {"unit": "days"},
+            "nextDueDate": "2024-06-17T10:00:00Z",
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 0
+
+    def test_interval_10_days_shown_within_5_days_advance(self, mock_hass, mock_config_entry):
+        """10-day interval task should be shown when within 5 days of due date."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "10-Day Interval Task",
+            "frequencyType": "interval",
+            "frequency": 10,
+            "frequencyMetadata": {"unit": "days"},
+            "nextDueDate": "2024-06-19T10:00:00Z",  # 4 days from now (within 5-day window)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
+        assert filtered[0].id == 1
+
+    def test_interval_10_days_hidden_beyond_5_days_advance(self, mock_hass, mock_config_entry):
+        """10-day interval task should be hidden when more than 5 days from due date."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "10-Day Interval Task",
+            "frequencyType": "interval",
+            "frequency": 10,
+            "frequencyMetadata": {"unit": "days"},
+            "nextDueDate": "2024-06-26T10:00:00Z",  # 11 days from now (beyond 5-day window)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 0
+
+    def test_interval_2_weeks_shown_within_7_days(self, mock_hass, mock_config_entry):
+        """2-week interval task should be shown when within 7 days of due date."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "2-Week Interval Task",
+            "frequencyType": "interval",
+            "frequency": 2,
+            "frequencyMetadata": {"unit": "weeks"},
+            "nextDueDate": "2024-06-21T10:00:00Z",  # 6 days from now (within 7-day window)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
+
+    def test_interval_2_weeks_hidden_beyond_7_days(self, mock_hass, mock_config_entry):
+        """2-week interval task should be hidden when more than 7 days from due date."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "2-Week Interval Task",
+            "frequencyType": "interval",
+            "frequency": 2,
+            "frequencyMetadata": {"unit": "weeks"},
+            "nextDueDate": "2024-06-30T10:00:00Z",  # 15 days from now (beyond 7-day window)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 0
+
+    def test_monthly_task_shown_within_7_days(self, mock_hass, mock_config_entry):
+        """Monthly interval task should be shown when within 7 days of due date."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "Monthly Task",
+            "frequencyType": "interval",
+            "frequency": 1,
+            "frequencyMetadata": {"unit": "months"},
+            "nextDueDate": "2024-06-20T10:00:00Z",  # 5 days from now
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
+
+    def test_yearly_task_shown_within_7_days(self, mock_hass, mock_config_entry):
+        """Yearly interval task should be shown when within 7 days of due date."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "Yearly Task",
+            "frequencyType": "interval",
+            "frequency": 1,
+            "frequencyMetadata": {"unit": "years"},
+            "nextDueDate": "2024-06-18T10:00:00Z",  # 3 days from now
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
+
+    def test_once_task_always_shown_in_upcoming(self, mock_hass, mock_config_entry):
+        """One-time tasks should always be shown in upcoming (no advance limit)."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "One-Time Task",
+            "frequencyType": "once",
+            "frequency": None,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-20T10:00:00Z",  # 5 days from now (within 7-day upcoming window)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
+
+    def test_no_repeat_task_always_shown_in_upcoming(self, mock_hass, mock_config_entry):
+        """No-repeat tasks should always be shown in upcoming (no advance limit)."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "No-Repeat Task",
+            "frequencyType": "no_repeat",
+            "frequency": None,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-21T10:00:00Z",  # 6 days from now (within 7-day upcoming window)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
+
+    def test_interval_5_days_shown_within_advance_window(self, mock_hass, mock_config_entry):
+        """5-day interval (boundary case) should be shown with 2-day advance window."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 12, 0, 0, tzinfo=tz)
+        
+        task_data = {
+            "id": 1,
+            "name": "5-Day Interval Task",
+            "frequencyType": "interval",
+            "frequency": 5,
+            "frequencyMetadata": {"unit": "days"},
+            "nextDueDate": "2024-06-17T10:00:00Z",  # 2 days from now (within 2-day window)
+            "isActive": True,
+            "assignedTo": None,
+        }
+        task = DonetickTask.from_json(task_data)
+        
+        coordinator = MagicMock()
+        coordinator.data = {1: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(coordinator, mock_config_entry, mock_hass, now)
+        filtered = entity._filter_tasks([task])
+        
+        assert len(filtered) == 1
