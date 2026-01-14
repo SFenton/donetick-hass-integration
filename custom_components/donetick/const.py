@@ -74,6 +74,9 @@ MAX_UPCOMING_DAYS = 365
 # Include unassigned tasks in assignee lists
 CONF_INCLUDE_UNASSIGNED = "include_unassigned_in_assignee_lists"
 
+# Auto-complete past due recurrent tasks
+CONF_AUTO_COMPLETE_PAST_DUE = "auto_complete_past_due_recurrent"
+
 # Time-of-day lists configuration
 CONF_CREATE_TIME_OF_DAY_LISTS = "create_time_of_day_lists"
 CONF_MORNING_CUTOFF = "morning_cutoff"  # Time when morning ends (e.g., "12:00")

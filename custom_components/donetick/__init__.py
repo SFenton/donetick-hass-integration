@@ -1020,6 +1020,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unsub = hass.data[DOMAIN][entry.entry_id].get("notification_action_unsub")
         if unsub:
             unsub()
+        
+        # Cancel all auto-completion schedules
+        auto_completion_manager = hass.data[DOMAIN][entry.entry_id].get("auto_completion_manager")
+        if auto_completion_manager:
+            auto_completion_manager.cancel_all()
     
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:

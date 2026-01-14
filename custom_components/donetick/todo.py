@@ -58,6 +58,11 @@ from .const import (
     FREQUENCY_INTERVAL,
     FREQUENCY_ONCE,
     FREQUENCY_NO_REPEAT,
+    FREQUENCY_MONTHLY,
+    FREQUENCY_YEARLY,
+    FREQUENCY_DAYS_OF_WEEK,
+    FREQUENCY_DAY_OF_MONTH,
+    CONF_AUTO_COMPLETE_PAST_DUE,
 )
 from .api import DonetickApiClient
 from .model import DonetickTask, DonetickMember
@@ -154,6 +159,331 @@ def _get_recurrence_advance_days(task: DonetickTask) -> Optional[int]:
     # min(half of recurrence rounded down, 7)
     half_recurrence = recurrence_days // 2
     return min(half_recurrence, 7)
+
+
+def _is_recurrent_task(task: DonetickTask) -> bool:
+    """Check if a task is recurrent (has a repeat schedule).
+    
+    Returns True if the task will generate a new occurrence when completed.
+    """
+    return task.frequency_type not in (FREQUENCY_ONCE, FREQUENCY_NO_REPEAT, None, "")
+
+
+def _calculate_next_recurrence_date(task: DonetickTask, local_tz: ZoneInfo) -> Optional[datetime]:
+    """Calculate when the next recurrence of a past-due task would occur.
+    
+    This calculates the theoretical next recurrence date based on the task's
+    frequency settings. For past-due tasks, this tells us when to auto-complete
+    so the next occurrence can be generated.
+    
+    Args:
+        task: The DonetickTask to calculate recurrence for.
+        local_tz: The local timezone for date calculations.
+        
+    Returns:
+        The datetime of the next recurrence, or None if:
+        - Task is not recurrent
+        - Task has no due date
+        - Unable to calculate next recurrence
+    """
+    if not _is_recurrent_task(task):
+        return None
+    
+    if task.next_due_date is None:
+        return None
+    
+    # Get the original due date in local timezone
+    due_date = task.next_due_date
+    if due_date.tzinfo is None:
+        due_date = due_date.replace(tzinfo=ZoneInfo("UTC"))
+    due_date_local = due_date.astimezone(local_tz)
+    
+    freq_type = task.frequency_type
+    freq = task.frequency if task.frequency else 1
+    metadata = task.frequency_metadata or {}
+    
+    # Calculate based on frequency type
+    if freq_type == FREQUENCY_DAILY:
+        # Daily: add freq days
+        next_date = due_date_local + timedelta(days=freq)
+        
+    elif freq_type == FREQUENCY_WEEKLY:
+        # Weekly: add freq weeks
+        next_date = due_date_local + timedelta(weeks=freq)
+        
+    elif freq_type == FREQUENCY_MONTHLY:
+        # Monthly: add freq months (approximate)
+        # Try to keep same day of month
+        year = due_date_local.year
+        month = due_date_local.month + freq
+        day = due_date_local.day
+        
+        # Handle year rollover
+        while month > 12:
+            month -= 12
+            year += 1
+        
+        # Handle days that don't exist in target month (e.g., Jan 31 -> Feb 28)
+        import calendar
+        max_day = calendar.monthrange(year, month)[1]
+        day = min(day, max_day)
+        
+        next_date = due_date_local.replace(year=year, month=month, day=day)
+        
+    elif freq_type == FREQUENCY_YEARLY:
+        # Yearly: add freq years
+        next_date = due_date_local.replace(year=due_date_local.year + freq)
+        
+    elif freq_type == FREQUENCY_INTERVAL:
+        # Custom interval based on unit
+        unit = metadata.get("unit", "days")
+        
+        if unit == "days":
+            next_date = due_date_local + timedelta(days=freq)
+        elif unit == "weeks":
+            next_date = due_date_local + timedelta(weeks=freq)
+        elif unit == "months":
+            # Same logic as monthly
+            year = due_date_local.year
+            month = due_date_local.month + freq
+            day = due_date_local.day
+            
+            while month > 12:
+                month -= 12
+                year += 1
+            
+            import calendar
+            max_day = calendar.monthrange(year, month)[1]
+            day = min(day, max_day)
+            
+            next_date = due_date_local.replace(year=year, month=month, day=day)
+        elif unit == "years":
+            next_date = due_date_local.replace(year=due_date_local.year + freq)
+        else:
+            # Unknown unit, default to days
+            next_date = due_date_local + timedelta(days=freq)
+            
+    elif freq_type == FREQUENCY_DAYS_OF_WEEK:
+        # Days of week recurrence - find next matching day
+        # metadata should contain which days (e.g., {"days": [0, 2, 4]} for Mon, Wed, Fri)
+        days = metadata.get("days", [])
+        if not days:
+            return None
+        
+        # Find the next day in the list after today
+        next_date = due_date_local + timedelta(days=1)
+        for _ in range(8):  # Max 7 days to find next occurrence
+            if next_date.weekday() in days:
+                break
+            next_date += timedelta(days=1)
+        else:
+            # Shouldn't happen, but fallback to 1 week
+            next_date = due_date_local + timedelta(weeks=1)
+            
+    elif freq_type == FREQUENCY_DAY_OF_MONTH:
+        # Day of month recurrence - find next matching day
+        # metadata should contain which day (e.g., {"day": 15})
+        target_day = metadata.get("day", due_date_local.day)
+        
+        # Move to next month and set the target day
+        year = due_date_local.year
+        month = due_date_local.month + 1
+        
+        if month > 12:
+            month = 1
+            year += 1
+        
+        import calendar
+        max_day = calendar.monthrange(year, month)[1]
+        day = min(target_day, max_day)
+        
+        next_date = due_date_local.replace(year=year, month=month, day=day)
+        
+    else:
+        # Unknown frequency type
+        return None
+    
+    return next_date
+
+
+def _get_midnight_of_date(dt: datetime, local_tz: ZoneInfo) -> datetime:
+    """Get midnight (00:00:00) of a given date in local timezone."""
+    dt_local = dt.astimezone(local_tz) if dt.tzinfo else dt.replace(tzinfo=local_tz)
+    return dt_local.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+# Global tracker for auto-completion schedules to prevent duplicates across entities
+# Key: task_id, Value: (cancel_callback, scheduled_time)
+_auto_completion_schedules: dict[int, tuple[Callable, datetime]] = {}
+
+
+class AutoCompletionManager:
+    """Manages automatic completion of past-due recurrent tasks.
+    
+    When a recurrent task becomes past due, this manager schedules an
+    auto-completion at midnight of the day when the next recurrence
+    would occur. This allows Donetick to generate the next occurrence
+    of the task, keeping the schedule moving forward.
+    """
+    
+    def __init__(
+        self, 
+        hass: HomeAssistant, 
+        config_entry: ConfigEntry,
+        client: DonetickApiClient
+    ) -> None:
+        """Initialize the auto-completion manager."""
+        self._hass = hass
+        self._config_entry = config_entry
+        self._client = client
+        self._scheduled_tasks: dict[int, Callable] = {}  # task_id -> cancel_callback
+        self._local_tz = ZoneInfo(hass.config.time_zone)
+    
+    def is_enabled(self) -> bool:
+        """Check if auto-completion is enabled."""
+        return self._config_entry.data.get(CONF_AUTO_COMPLETE_PAST_DUE, False)
+    
+    async def process_tasks(self, tasks: list[DonetickTask]) -> None:
+        """Process a list of tasks and schedule auto-completions as needed.
+        
+        This should be called after each coordinator update with the current
+        list of all tasks.
+        """
+        if not self.is_enabled():
+            return
+        
+        local_now = datetime.now(self._local_tz)
+        current_task_ids = set()
+        
+        for task in tasks:
+            # Skip inactive tasks
+            if not task.is_active:
+                continue
+                
+            # Skip non-recurrent tasks
+            if not _is_recurrent_task(task):
+                continue
+            
+            # Skip tasks without due dates
+            if task.next_due_date is None:
+                continue
+            
+            # Check if task is past due
+            task_due = task.next_due_date
+            if task_due.tzinfo is None:
+                task_due = task_due.replace(tzinfo=ZoneInfo("UTC"))
+            task_due_local = task_due.astimezone(self._local_tz)
+            
+            if task_due_local >= local_now:
+                # Not past due - cancel any existing schedule
+                self._cancel_schedule(task.id)
+                continue
+            
+            current_task_ids.add(task.id)
+            
+            # Calculate next recurrence date
+            next_recurrence = _calculate_next_recurrence_date(task, self._local_tz)
+            if next_recurrence is None:
+                continue
+            
+            # Get midnight of the next recurrence day
+            midnight = _get_midnight_of_date(next_recurrence, self._local_tz)
+            
+            # If midnight is in the past, schedule for next available time (now + small delay)
+            if midnight <= local_now:
+                # The next recurrence day has already started, auto-complete soon
+                midnight = local_now + timedelta(seconds=5)
+            
+            # Schedule auto-completion if not already scheduled for this time
+            self._schedule_auto_completion(task, midnight)
+        
+        # Cancel schedules for tasks that are no longer past due
+        scheduled_task_ids = set(self._scheduled_tasks.keys())
+        for task_id in scheduled_task_ids - current_task_ids:
+            self._cancel_schedule(task_id)
+    
+    def _schedule_auto_completion(self, task: DonetickTask, when: datetime) -> None:
+        """Schedule auto-completion for a task at a specific time."""
+        global _auto_completion_schedules
+        
+        task_id = task.id
+        
+        # Check if already scheduled for the same time
+        if task_id in _auto_completion_schedules:
+            _, scheduled_time = _auto_completion_schedules[task_id]
+            if abs((scheduled_time - when).total_seconds()) < 60:
+                # Already scheduled for approximately the same time
+                return
+            # Cancel existing schedule
+            self._cancel_schedule(task_id)
+        
+        _LOGGER.debug(
+            "Scheduling auto-completion for task %d (%s) at %s",
+            task_id, task.name, when.isoformat()
+        )
+        
+        @callback
+        def auto_complete_callback(now: datetime) -> None:
+            """Callback to auto-complete the task."""
+            self._hass.async_create_task(
+                self._execute_auto_completion(task_id, task.name)
+            )
+        
+        # Schedule the callback
+        cancel = async_track_point_in_time(
+            self._hass,
+            auto_complete_callback,
+            when
+        )
+        
+        self._scheduled_tasks[task_id] = cancel
+        _auto_completion_schedules[task_id] = (cancel, when)
+    
+    async def _execute_auto_completion(self, task_id: int, task_name: str) -> None:
+        """Execute the auto-completion of a task."""
+        global _auto_completion_schedules
+        
+        _LOGGER.info(
+            "Auto-completing past-due recurrent task %d (%s) to generate next occurrence",
+            task_id, task_name
+        )
+        
+        try:
+            await self._client.async_complete_task(task_id)
+            _LOGGER.info("Successfully auto-completed task %d", task_id)
+            
+            # Clean up tracking
+            if task_id in self._scheduled_tasks:
+                del self._scheduled_tasks[task_id]
+            if task_id in _auto_completion_schedules:
+                del _auto_completion_schedules[task_id]
+            
+            # Trigger a coordinator refresh to get the new task occurrence
+            coordinator = self._hass.data[DOMAIN].get(
+                self._config_entry.entry_id, {}
+            ).get("coordinator")
+            if coordinator:
+                await coordinator.async_request_refresh()
+                
+        except Exception as e:
+            _LOGGER.error("Failed to auto-complete task %d: %s", task_id, e)
+    
+    def _cancel_schedule(self, task_id: int) -> None:
+        """Cancel a scheduled auto-completion."""
+        global _auto_completion_schedules
+        
+        if task_id in self._scheduled_tasks:
+            cancel = self._scheduled_tasks.pop(task_id)
+            cancel()
+            _LOGGER.debug("Cancelled auto-completion schedule for task %d", task_id)
+        
+        if task_id in _auto_completion_schedules:
+            del _auto_completion_schedules[task_id]
+    
+    def cancel_all(self) -> None:
+        """Cancel all scheduled auto-completions."""
+        for task_id in list(self._scheduled_tasks.keys()):
+            self._cancel_schedule(task_id)
 
 
 # Global tracker for notification reminders to prevent duplicates across entities
@@ -746,6 +1076,25 @@ async def async_setup_entry(
     
     # Store the coordinator in hass.data so the webhook can trigger refreshes
     hass.data[DOMAIN][config_entry.entry_id]["coordinator"] = coordinator
+    
+    # Create and store auto-completion manager for past-due recurrent tasks
+    auto_completion_manager = AutoCompletionManager(hass, config_entry, client)
+    hass.data[DOMAIN][config_entry.entry_id]["auto_completion_manager"] = auto_completion_manager
+    
+    # Process initial tasks for auto-completion scheduling
+    if coordinator.data:
+        await auto_completion_manager.process_tasks(list(coordinator.data.values()))
+    
+    # Set up listener to process tasks on each coordinator update
+    @callback
+    def _handle_coordinator_update() -> None:
+        """Handle coordinator updates for auto-completion scheduling."""
+        if coordinator.data:
+            hass.async_create_task(
+                auto_completion_manager.process_tasks(list(coordinator.data.values()))
+            )
+    
+    coordinator.async_add_listener(_handle_coordinator_update)
 
     entities = []
     
