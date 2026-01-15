@@ -1388,10 +1388,16 @@ class DonetickTodoListBase(CoordinatorEntity, TodoListEntity):
                 
                 res = await client.async_complete_task(task_id, completed_by)
                 if res.frequency_type != "once":
-                    _LOGGER.debug("Task %s is recurring, updating next due date", res.name)
-                    item.status = TodoItemStatus.NEEDS_ACTION
-                    item.due = res.next_due_date
-                    self.async_update_todo_item(item)
+                    _LOGGER.debug(
+                        "Task %s is recurring, next due date is %s. "
+                        "The coordinator refresh will pick up the new occurrence.",
+                        res.name, res.next_due_date
+                    )
+                    # NOTE: We intentionally do NOT recursively call async_update_todo_item here.
+                    # The coordinator.async_refresh() at the end of this method will fetch the
+                    # updated task with the new next_due_date. Recursively calling would cause
+                    # a spurious update API call to Donetick with the new due date, which could
+                    # lead to bugs where the next day's recurrence gets unexpectedly completed.
             else:
                 # Update task properties (summary, description, due date)
                 _LOGGER.debug("Updating task %d properties", task_id)

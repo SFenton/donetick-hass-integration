@@ -2304,3 +2304,255 @@ class TestGetCompletionUserId:
         result = await entity._get_completion_user_id(mock_client, item)
         
         assert result == task.assigned_to
+
+
+class TestAsyncUpdateTodoItem:
+    """Tests for async_update_todo_item method - ensuring single completion calls."""
+
+    @pytest.fixture
+    def mock_hass(self):
+        """Create mock Home Assistant instance."""
+        hass = MagicMock()
+        hass.config = MagicMock()
+        hass.config.time_zone = "America/New_York"
+        hass.data = {DOMAIN: {"test_entry_id": {}}}
+        return hass
+
+    @pytest.fixture
+    def mock_config_entry(self):
+        """Create mock config entry."""
+        entry = MagicMock()
+        entry.entry_id = "test_entry_id"
+        entry.data = {
+            CONF_URL: "https://donetick.example.com",
+            CONF_AUTH_TYPE: AUTH_TYPE_JWT,
+            "username": "test",
+            "password": "test",
+        }
+        return entry
+
+    @pytest.fixture
+    def mock_coordinator(self):
+        """Create mock coordinator."""
+        coordinator = MagicMock()
+        coordinator.data = {}
+        coordinator.data_version = 1
+        coordinator.tasks_list = []
+        coordinator.async_refresh = AsyncMock()
+        return coordinator
+
+    @pytest.fixture
+    def sample_recurring_task_json(self, sample_chore_json):
+        """Create sample recurring (daily) task JSON."""
+        task_json = sample_chore_json.copy()
+        task_json["frequencyType"] = "daily"
+        task_json["frequency"] = 1
+        return task_json
+
+    @pytest.fixture
+    def sample_one_time_task_json(self, sample_chore_json):
+        """Create sample one-time task JSON."""
+        task_json = sample_chore_json.copy()
+        task_json["frequencyType"] = "once"
+        task_json["frequency"] = 0
+        return task_json
+
+    @pytest.mark.asyncio
+    async def test_complete_recurring_task_calls_api_once(
+        self, mock_coordinator, mock_config_entry, mock_hass, sample_recurring_task_json
+    ):
+        """Test that completing a recurring task only calls Donetick API once."""
+        task = DonetickTask.from_json(sample_recurring_task_json)
+        mock_coordinator.data = {task.id: task}
+        
+        entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
+        
+        # Create completed item
+        item = TodoItem(
+            uid=f"{task.id}--2024-01-15T18:00:00Z",
+            summary=task.name,
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        # Mock the API client
+        with patch("custom_components.donetick.todo._create_api_client") as mock_create_client:
+            mock_client = AsyncMock()
+            # Return task with updated next_due_date (next day)
+            completed_task_response = sample_recurring_task_json.copy()
+            completed_task_response["nextDueDate"] = "2024-01-16T18:00:00Z"
+            mock_client.async_complete_task = AsyncMock(
+                return_value=DonetickTask.from_json(completed_task_response)
+            )
+            mock_client.async_update_task = AsyncMock()
+            mock_create_client.return_value = mock_client
+            
+            await entity.async_update_todo_item(item)
+            
+            # Verify complete was called exactly once
+            assert mock_client.async_complete_task.call_count == 1
+            mock_client.async_complete_task.assert_called_once_with(task.id, task.assigned_to)
+            
+            # Verify update was NOT called (no spurious update for recurring tasks)
+            mock_client.async_update_task.assert_not_called()
+            
+            # Verify coordinator refresh was called
+            mock_coordinator.async_refresh.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_complete_one_time_task_calls_api_once(
+        self, mock_coordinator, mock_config_entry, mock_hass, sample_one_time_task_json
+    ):
+        """Test that completing a one-time task only calls Donetick API once."""
+        task = DonetickTask.from_json(sample_one_time_task_json)
+        mock_coordinator.data = {task.id: task}
+        
+        entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
+        
+        item = TodoItem(
+            uid=f"{task.id}--2024-01-15T18:00:00Z",
+            summary=task.name,
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        with patch("custom_components.donetick.todo._create_api_client") as mock_create_client:
+            mock_client = AsyncMock()
+            mock_client.async_complete_task = AsyncMock(
+                return_value=DonetickTask.from_json(sample_one_time_task_json)
+            )
+            mock_client.async_update_task = AsyncMock()
+            mock_create_client.return_value = mock_client
+            
+            await entity.async_update_todo_item(item)
+            
+            # Verify complete was called exactly once
+            assert mock_client.async_complete_task.call_count == 1
+            
+            # Verify update was NOT called
+            mock_client.async_update_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_task_properties_does_not_complete(
+        self, mock_coordinator, mock_config_entry, mock_hass, sample_chore_json
+    ):
+        """Test that updating task properties (not completing) calls update, not complete."""
+        task = DonetickTask.from_json(sample_chore_json)
+        mock_coordinator.data = {task.id: task}
+        
+        entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
+        
+        # Item with NEEDS_ACTION status (not completing, just updating)
+        item = TodoItem(
+            uid=f"{task.id}--2024-01-15T18:00:00Z",
+            summary="Updated Task Name",
+            description="Updated description",
+            status=TodoItemStatus.NEEDS_ACTION,
+            due=datetime(2024, 1, 20, 18, 0, 0, tzinfo=timezone.utc),
+        )
+        
+        with patch("custom_components.donetick.todo._create_api_client") as mock_create_client:
+            mock_client = AsyncMock()
+            mock_client.async_complete_task = AsyncMock()
+            mock_client.async_update_task = AsyncMock(
+                return_value=DonetickTask.from_json(sample_chore_json)
+            )
+            mock_create_client.return_value = mock_client
+            
+            await entity.async_update_todo_item(item)
+            
+            # Verify complete was NOT called
+            mock_client.async_complete_task.assert_not_called()
+            
+            # Verify update was called exactly once
+            assert mock_client.async_update_task.call_count == 1
+            mock_client.async_update_task.assert_called_once_with(
+                task_id=task.id,
+                name="Updated Task Name",
+                description="Updated description",
+                due_date=item.due.isoformat(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_recurring_task_completion_does_not_trigger_update_call(
+        self, mock_coordinator, mock_config_entry, mock_hass, sample_recurring_task_json
+    ):
+        """Regression test: completing recurring task must not trigger async_update_task.
+        
+        This test specifically guards against the bug where completing a recurring task
+        would recursively call async_update_todo_item, which then called async_update_task
+        with the new due date, potentially causing the next occurrence to be completed.
+        """
+        task = DonetickTask.from_json(sample_recurring_task_json)
+        mock_coordinator.data = {task.id: task}
+        
+        entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
+        
+        item = TodoItem(
+            uid=f"{task.id}--2024-01-15T18:00:00Z",
+            summary=task.name,
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        with patch("custom_components.donetick.todo._create_api_client") as mock_create_client:
+            mock_client = AsyncMock()
+            # Simulate Donetick returning task with next occurrence
+            completed_response = sample_recurring_task_json.copy()
+            completed_response["nextDueDate"] = "2024-01-16T18:00:00Z"
+            mock_client.async_complete_task = AsyncMock(
+                return_value=DonetickTask.from_json(completed_response)
+            )
+            mock_client.async_update_task = AsyncMock()
+            mock_create_client.return_value = mock_client
+            
+            await entity.async_update_todo_item(item)
+            
+            # CRITICAL: async_update_task must NOT be called when completing a task
+            # This is the regression we're guarding against
+            mock_client.async_update_task.assert_not_called()
+            
+            # async_complete_task should be called exactly once
+            assert mock_client.async_complete_task.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_multiple_lists_same_task_single_completion(
+        self, mock_coordinator, mock_config_entry, mock_hass, sample_recurring_task_json, sample_circle_member_json
+    ):
+        """Test that completing a task from one list only fires one API call.
+        
+        Even though a task may appear in multiple lists (All Tasks, Assignee list,
+        Date-filtered list), completing from one list should only call the API once.
+        """
+        task = DonetickTask.from_json(sample_recurring_task_json)
+        member = DonetickMember.from_json(sample_circle_member_json)
+        mock_coordinator.data = {task.id: task}
+        
+        # Create multiple list entities for the same coordinator
+        all_tasks_list = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
+        assignee_list = DonetickAssigneeTasksList(mock_coordinator, mock_config_entry, member, mock_hass)
+        
+        item = TodoItem(
+            uid=f"{task.id}--2024-01-15T18:00:00Z",
+            summary=task.name,
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        with patch("custom_components.donetick.todo._create_api_client") as mock_create_client:
+            mock_client = AsyncMock()
+            completed_response = sample_recurring_task_json.copy()
+            completed_response["nextDueDate"] = "2024-01-16T18:00:00Z"
+            mock_client.async_complete_task = AsyncMock(
+                return_value=DonetickTask.from_json(completed_response)
+            )
+            mock_client.async_update_task = AsyncMock()
+            mock_create_client.return_value = mock_client
+            
+            # Complete from the assignee list
+            await assignee_list.async_update_todo_item(item)
+            
+            # Should have called complete exactly once
+            assert mock_client.async_complete_task.call_count == 1
+            
+            # Should use the member's user_id for completion
+            mock_client.async_complete_task.assert_called_once_with(task.id, member.user_id)
+            
+            # No update calls
+            mock_client.async_update_task.assert_not_called()
