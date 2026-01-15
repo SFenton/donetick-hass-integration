@@ -1,5 +1,6 @@
 """Todo for Donetick integration."""
 import logging
+import asyncio
 from datetime import datetime, timedelta, date
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
@@ -68,6 +69,11 @@ from .api import DonetickApiClient
 from .model import DonetickTask, DonetickMember
 
 _LOGGER = logging.getLogger(__name__)
+
+# Track recently completed task IDs to prevent double-completion across list entities
+# Key: task_id (int), Value: timestamp when completed
+_recently_completed_task_ids: dict[int, datetime] = {}
+_completion_lock = asyncio.Lock()
 
 
 def _is_frequent_recurrence(task: DonetickTask) -> bool:
@@ -1371,7 +1377,10 @@ class DonetickTodoListBase(CoordinatorEntity, TodoListEntity):
 
     async def async_update_todo_item(self, item: TodoItem, context = None) -> None:
         """Update a todo item."""
-        _LOGGER.debug("Update todo item: %s %s", item.uid, item.status)
+        _LOGGER.debug(
+            "async_update_todo_item called: List=%s, UID=%s, Status=%s",
+            self._attr_name, item.uid, item.status
+        )
         if not self.coordinator.data:
             return None
         
@@ -1381,8 +1390,34 @@ class DonetickTodoListBase(CoordinatorEntity, TodoListEntity):
         
         try:
             if item.status == TodoItemStatus.COMPLETED:
+                # Guard: Check if this task was recently completed (prevents double-completion
+                # when multiple list entities contain the same task, or when HA fires
+                # completion events multiple times). Uses task ID since UID includes the
+                # due date which changes after completion.
+                global _recently_completed_task_ids
+                async with _completion_lock:
+                    now = datetime.now()
+                    # Clean up old entries (older than 30 seconds)
+                    expired = [tid for tid, ts in _recently_completed_task_ids.items() 
+                               if (now - ts).total_seconds() > 30]
+                    for tid in expired:
+                        del _recently_completed_task_ids[tid]
+                    
+                    if task_id in _recently_completed_task_ids:
+                        _LOGGER.debug(
+                            "Ignoring duplicate completion for task %d - already completed %.1f seconds ago",
+                            task_id, (now - _recently_completed_task_ids[task_id]).total_seconds()
+                        )
+                        return
+                    
+                    # Mark this task as being completed
+                    _recently_completed_task_ids[task_id] = now
+                
                 # Complete the task
-                _LOGGER.debug("Completing task %s", item.uid)
+                _LOGGER.debug(
+                    "Completing task %d via %s list",
+                    task_id, self._attr_name
+                )
                 # Determine who should complete this task using smart logic
                 completed_by = await self._get_completion_user_id(client, item, context)
                 

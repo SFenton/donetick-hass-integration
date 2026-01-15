@@ -2314,6 +2314,14 @@ class TestGetCompletionUserId:
 class TestAsyncUpdateTodoItem:
     """Tests for async_update_todo_item method - ensuring single completion calls."""
 
+    @pytest.fixture(autouse=True)
+    def reset_completion_tracking(self):
+        """Reset the global completion tracking before each test."""
+        import custom_components.donetick.todo as todo_module
+        todo_module._recently_completed_task_ids.clear()
+        yield
+        todo_module._recently_completed_task_ids.clear()
+
     @pytest.fixture
     def mock_hass(self):
         """Create mock Home Assistant instance."""
@@ -2561,6 +2569,51 @@ class TestAsyncUpdateTodoItem:
             
             # No update calls
             mock_client.async_update_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_duplicate_completion_blocked_across_lists(
+        self, mock_coordinator, mock_config_entry, mock_hass, sample_recurring_task_json, sample_circle_member_json
+    ):
+        """Test that completing the same task from multiple lists only calls API once.
+        
+        This guards against the case where HA might fire completion events on multiple
+        list entities containing the same task.
+        """
+        task = DonetickTask.from_json(sample_recurring_task_json)
+        member = DonetickMember.from_json(sample_circle_member_json)
+        mock_coordinator.data = {task.id: task}
+        
+        # Create multiple list entities for the same coordinator
+        all_tasks_list = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
+        assignee_list = DonetickAssigneeTasksList(mock_coordinator, mock_config_entry, member, mock_hass)
+        
+        item = TodoItem(
+            uid=f"{task.id}--2024-01-15T18:00:00Z",
+            summary=task.name,
+            status=TodoItemStatus.COMPLETED,
+        )
+        
+        with patch("custom_components.donetick.todo._create_api_client") as mock_create_client:
+            mock_client = AsyncMock()
+            completed_response = sample_recurring_task_json.copy()
+            completed_response["nextDueDate"] = "2024-01-16T18:00:00Z"
+            mock_client.async_complete_task = AsyncMock(
+                return_value=DonetickTask.from_json(completed_response)
+            )
+            mock_client.async_update_task = AsyncMock()
+            mock_create_client.return_value = mock_client
+            
+            # Complete from the all tasks list
+            await all_tasks_list.async_update_todo_item(item)
+            
+            # First call should succeed
+            assert mock_client.async_complete_task.call_count == 1
+            
+            # Now try to complete from the assignee list (same task)
+            await assignee_list.async_update_todo_item(item)
+            
+            # API should still only have been called once (second call was blocked)
+            assert mock_client.async_complete_task.call_count == 1
 
 
 class TestUpcomingTodayByTimeAndFutureList:
