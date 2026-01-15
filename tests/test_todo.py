@@ -16,6 +16,9 @@ from custom_components.donetick.todo import (
     DonetickDateFilteredTasksList,
     DonetickTimeOfDayTasksList,
     DonetickTimeOfDayWithUnassignedList,
+    DonetickUpcomingTodayByTimeList,
+    DonetickUpcomingTodayByTimeAndFutureList,
+    DonetickUpcomingTodayByTimeAndFutureWithUnassignedList,
     _is_frequent_recurrence,
     _get_recurrence_advance_days,
 )
@@ -31,6 +34,8 @@ from custom_components.donetick.const import (
     CONF_AFTERNOON_CUTOFF,
     DEFAULT_MORNING_CUTOFF,
     DEFAULT_AFTERNOON_CUTOFF,
+    CONF_UPCOMING_DAYS,
+    DEFAULT_UPCOMING_DAYS,
     FREQUENCY_DAILY,
     FREQUENCY_WEEKLY,
     FREQUENCY_INTERVAL,
@@ -2556,3 +2561,209 @@ class TestAsyncUpdateTodoItem:
             
             # No update calls
             mock_client.async_update_task.assert_not_called()
+
+
+class TestUpcomingTodayByTimeAndFutureList:
+    """Tests for DonetickUpcomingTodayByTimeAndFutureList filtering logic."""
+
+    @pytest.fixture
+    def mock_hass(self):
+        """Create mock Home Assistant instance."""
+        hass = MagicMock()
+        hass.config = MagicMock()
+        hass.config.time_zone = "America/New_York"
+        hass.data = {DOMAIN: {"test_entry_id": {}}}
+        return hass
+
+    @pytest.fixture
+    def mock_config_entry(self):
+        """Create mock config entry."""
+        entry = MagicMock()
+        entry.entry_id = "test_entry_id"
+        entry.data = {
+            CONF_URL: "https://donetick.example.com",
+            CONF_AUTH_TYPE: AUTH_TYPE_JWT,
+            CONF_MORNING_CUTOFF: DEFAULT_MORNING_CUTOFF,
+            CONF_AFTERNOON_CUTOFF: DEFAULT_AFTERNOON_CUTOFF,
+            CONF_UPCOMING_DAYS: DEFAULT_UPCOMING_DAYS,
+        }
+        return entry
+
+    @pytest.fixture
+    def mock_coordinator(self):
+        """Create mock coordinator."""
+        coordinator = MagicMock()
+        coordinator.data = {}
+        coordinator.data_version = 1
+        coordinator.tasks_list = []
+        return coordinator
+
+    def _create_task_with_due_time(self, task_json, due_time_str):
+        """Helper to create a task with a specific due time."""
+        task_data = task_json.copy()
+        task_data["nextDueDate"] = due_time_str
+        task_data["assignedTo"] = None  # Unassigned
+        return DonetickTask.from_json(task_data)
+
+    def _create_entity_with_mocked_time(self, mock_coordinator, mock_config_entry, mock_hass, now):
+        """Create entity with mocked current time."""
+        entity = DonetickUpcomingTodayByTimeAndFutureList(
+            mock_coordinator, mock_config_entry, mock_hass, member=None
+        )
+        entity._get_local_now = lambda: now
+        entity._get_local_today_start = lambda: now.replace(hour=0, minute=0, second=0, microsecond=0)
+        entity._get_local_today_end = lambda: now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return entity
+
+    def test_evening_task_shown_when_in_evening_period(
+        self, mock_coordinator, mock_config_entry, mock_hass, sample_chore_json
+    ):
+        """Test that evening tasks are shown when current time is in evening period.
+        
+        Regression test: Evening tasks were being excluded because next_boundary is None
+        when we're in the evening period.
+        """
+        tz = ZoneInfo("America/New_York")
+        # Current time is 8 PM (evening period, after afternoon cutoff)
+        now = datetime(2024, 1, 15, 20, 0, 0, tzinfo=tz)
+        
+        # Task due at 11 PM today (also evening)
+        task = self._create_task_with_due_time(
+            sample_chore_json, "2024-01-15T23:00:00-05:00"
+        )
+        mock_coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(
+            mock_coordinator, mock_config_entry, mock_hass, now
+        )
+        
+        filtered = entity._filter_tasks([task])
+        
+        # The 11 PM task should be included (it's after 8 PM)
+        assert len(filtered) == 1
+        assert filtered[0].id == task.id
+
+    def test_afternoon_task_shown_when_in_morning_period(
+        self, mock_coordinator, mock_config_entry, mock_hass, sample_chore_json
+    ):
+        """Test that afternoon tasks are shown when current time is in morning period."""
+        tz = ZoneInfo("America/New_York")
+        # Current time is 9 AM (morning period)
+        now = datetime(2024, 1, 15, 9, 0, 0, tzinfo=tz)
+        
+        # Task due at 1 PM today (afternoon)
+        task = self._create_task_with_due_time(
+            sample_chore_json, "2024-01-15T13:00:00-05:00"
+        )
+        mock_coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(
+            mock_coordinator, mock_config_entry, mock_hass, now
+        )
+        
+        filtered = entity._filter_tasks([task])
+        
+        # The 1 PM task should be included (it's past morning cutoff)
+        assert len(filtered) == 1
+
+    def test_evening_task_shown_when_in_morning_period(
+        self, mock_coordinator, mock_config_entry, mock_hass, sample_chore_json
+    ):
+        """Test that evening tasks are shown when current time is in morning period."""
+        tz = ZoneInfo("America/New_York")
+        # Current time is 9 AM (morning period)
+        now = datetime(2024, 1, 15, 9, 0, 0, tzinfo=tz)
+        
+        # Task due at 11 PM today (evening)
+        task = self._create_task_with_due_time(
+            sample_chore_json, "2024-01-15T23:00:00-05:00"
+        )
+        mock_coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(
+            mock_coordinator, mock_config_entry, mock_hass, now
+        )
+        
+        filtered = entity._filter_tasks([task])
+        
+        # The 11 PM task should be included (it's past morning cutoff)
+        assert len(filtered) == 1
+
+    def test_past_due_task_not_shown_in_evening(
+        self, mock_coordinator, mock_config_entry, mock_hass, sample_chore_json
+    ):
+        """Test that past due tasks are not shown even in evening period."""
+        tz = ZoneInfo("America/New_York")
+        # Current time is 10 PM
+        now = datetime(2024, 1, 15, 22, 0, 0, tzinfo=tz)
+        
+        # Task due at 8 PM today (already past)
+        task = self._create_task_with_due_time(
+            sample_chore_json, "2024-01-15T20:00:00-05:00"
+        )
+        mock_coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(
+            mock_coordinator, mock_config_entry, mock_hass, now
+        )
+        
+        filtered = entity._filter_tasks([task])
+        
+        # The 8 PM task should NOT be included (it's past due)
+        assert len(filtered) == 0
+
+    def test_future_day_task_shown(
+        self, mock_coordinator, mock_config_entry, mock_hass, sample_chore_json
+    ):
+        """Test that tasks on future days are included."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 1, 15, 20, 0, 0, tzinfo=tz)
+        
+        # Task due tomorrow
+        task_data = sample_chore_json.copy()
+        task_data["nextDueDate"] = "2024-01-16T13:00:00-05:00"
+        task_data["assignedTo"] = None
+        task_data["frequencyType"] = "once"  # Non-recurring
+        task = DonetickTask.from_json(task_data)
+        mock_coordinator.tasks_list = [task]
+        
+        entity = self._create_entity_with_mocked_time(
+            mock_coordinator, mock_config_entry, mock_hass, now
+        )
+        
+        filtered = entity._filter_tasks([task])
+        
+        # Tomorrow's task should be included
+        assert len(filtered) == 1
+
+    def test_multiple_evening_tasks_all_shown(
+        self, mock_coordinator, mock_config_entry, mock_hass, sample_chore_json
+    ):
+        """Test that multiple evening tasks are all shown when in evening period."""
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 1, 15, 19, 0, 0, tzinfo=tz)  # 7 PM
+        
+        # Multiple tasks in the evening
+        task1 = self._create_task_with_due_time(sample_chore_json, "2024-01-15T20:00:00-05:00")
+        task1_data = sample_chore_json.copy()
+        task1_data["id"] = 101
+        task1_data["nextDueDate"] = "2024-01-15T21:00:00-05:00"
+        task1_data["assignedTo"] = None
+        task2 = DonetickTask.from_json(task1_data)
+        
+        task3_data = sample_chore_json.copy()
+        task3_data["id"] = 102
+        task3_data["nextDueDate"] = "2024-01-15T23:00:00-05:00"
+        task3_data["assignedTo"] = None
+        task3 = DonetickTask.from_json(task3_data)
+        
+        mock_coordinator.tasks_list = [task1, task2, task3]
+        
+        entity = self._create_entity_with_mocked_time(
+            mock_coordinator, mock_config_entry, mock_hass, now
+        )
+        
+        filtered = entity._filter_tasks([task1, task2, task3])
+        
+        # All 3 tasks should be included
+        assert len(filtered) == 3

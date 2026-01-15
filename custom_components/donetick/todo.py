@@ -2695,8 +2695,13 @@ class DonetickUpcomingTodayByTimeAndFutureList(DonetickUpcomingTodayByTimeList):
                 if task_due < local_now:
                     continue
                 
-                # Include if past next boundary (or if no boundary, skip today's tasks)
-                if next_boundary is not None and task_due > next_boundary:
+                # Include if past next boundary, OR if we're in evening (no boundary)
+                # and the task is still upcoming (after current time)
+                if next_boundary is not None:
+                    if task_due > next_boundary:
+                        filtered.append(task)
+                else:
+                    # Evening period - include all remaining today tasks after now
                     filtered.append(task)
             
             # Case 2: Future tasks (existing Upcoming logic)
@@ -2796,7 +2801,13 @@ class DonetickUpcomingTodayByTimeAndFutureWithUnassignedList(DonetickUpcomingTod
                 if task_due < local_now:
                     continue
                 
-                if next_boundary is not None and task_due > next_boundary:
+                # Include if past next boundary, OR if we're in evening (no boundary)
+                # and the task is still upcoming (after current time)
+                if next_boundary is not None:
+                    if task_due > next_boundary:
+                        filtered.append(task)
+                else:
+                    # Evening period - include all remaining today tasks after now
                     filtered.append(task)
             
             # Case 2: Future tasks
