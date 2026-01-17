@@ -1881,8 +1881,8 @@ class TestDonetickTimeOfDayTasksList:
         
         assert len(filtered) == 1
 
-    def test_past_due_task_also_in_morning_list(self, mock_hass, mock_config_entry, mock_coordinator):
-        """Past due morning task SHOULD appear in morning list (and past due list)."""
+    def test_past_due_task_not_in_morning_list(self, mock_hass, mock_config_entry, mock_coordinator):
+        """Past due morning task should NOT appear in morning list (only in past due list)."""
         tz = ZoneInfo("America/New_York")
         now = datetime(2024, 6, 15, 14, 0, 0, tzinfo=tz)  # 2 PM (past morning)
         
@@ -1901,11 +1901,15 @@ class TestDonetickTimeOfDayTasksList:
         mock_coordinator.tasks_list = [task]
         mock_coordinator.data = {1: task}
         
+        # Verify it's NOT in morning list
         entity = self._create_entity_with_mocked_time(mock_coordinator, mock_config_entry, mock_hass, now, "morning")
         filtered = entity._filter_tasks([task])
+        assert len(filtered) == 0
         
-        # Past due task SHOULD be in morning list (appears in both)
-        assert len(filtered) == 1
+        # Verify it IS in past_due list
+        past_due_entity = self._create_entity_with_mocked_time(mock_coordinator, mock_config_entry, mock_hass, now, "past_due")
+        past_due_filtered = past_due_entity._filter_tasks([task])
+        assert len(past_due_filtered) == 1
 
     def test_task_due_tomorrow_not_in_today_lists(self, mock_hass, mock_config_entry, mock_coordinator):
         """Task due tomorrow should not appear in any time-of-day lists."""
