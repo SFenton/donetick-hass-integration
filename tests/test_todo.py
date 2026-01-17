@@ -2257,6 +2257,57 @@ class TestGetCompletionUserId:
         
         assert result == sample_member.user_id
 
+    def test_past_due_task_not_in_afternoon_list_with_unassigned(
+        self, mock_hass, mock_config_entry, mock_coordinator, sample_member
+    ):
+        """Past due afternoon task should NOT appear in afternoon list (only in past due list) for WithUnassigned variant."""
+        from custom_components.donetick.todo import DonetickTimeOfDayWithUnassignedList
+        from custom_components.donetick.model import DonetickTask
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from unittest.mock import patch
+        
+        mock_config_entry.data[CONF_MORNING_CUTOFF] = DEFAULT_MORNING_CUTOFF
+        mock_config_entry.data[CONF_AFTERNOON_CUTOFF] = DEFAULT_AFTERNOON_CUTOFF
+        
+        tz = ZoneInfo("America/New_York")
+        now = datetime(2024, 6, 15, 16, 0, 0, tzinfo=tz)  # 4 PM (past afternoon task at 1 PM)
+        
+        # Task was due at 1 PM local time (past due, in afternoon window)
+        task_data = {
+            "id": 1,
+            "name": "Past Due Afternoon Task",
+            "frequencyType": "once",
+            "frequency": 1,
+            "frequencyMetadata": None,
+            "nextDueDate": "2024-06-15T17:00:00Z",  # 1 PM EDT
+            "isActive": True,
+            "assignedTo": sample_member.user_id,
+        }
+        task = DonetickTask.from_json(task_data)
+        mock_coordinator.tasks_list = [task]
+        mock_coordinator.data = {1: task}
+        
+        with patch.object(DonetickTimeOfDayWithUnassignedList, '_get_local_now', return_value=now), \
+             patch.object(DonetickTimeOfDayWithUnassignedList, '_get_local_today_start', 
+                         return_value=datetime(2024, 6, 15, 0, 0, 0, tzinfo=tz)), \
+             patch.object(DonetickTimeOfDayWithUnassignedList, '_get_local_today_end', 
+                         return_value=datetime(2024, 6, 15, 23, 59, 59, tzinfo=tz)):
+            
+            # Verify it's NOT in afternoon list
+            afternoon_entity = DonetickTimeOfDayWithUnassignedList(
+                mock_coordinator, mock_config_entry, mock_hass, "afternoon", member=sample_member
+            )
+            filtered = afternoon_entity._filter_tasks([task])
+            assert len(filtered) == 0
+            
+            # Verify it IS in past_due list
+            past_due_entity = DonetickTimeOfDayWithUnassignedList(
+                mock_coordinator, mock_config_entry, mock_hass, "past_due", member=sample_member
+            )
+            past_due_filtered = past_due_entity._filter_tasks([task])
+            assert len(past_due_filtered) == 1
+
     @pytest.mark.asyncio
     async def test_multiple_tasks_finds_correct_one(
         self, mock_coordinator, mock_config_entry, mock_hass, mock_client, sample_chore_json
