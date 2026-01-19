@@ -38,6 +38,7 @@
                     "refresh_interval": "Sync interval",
                     "upcoming_days": "Only show upcoming tasks within this many days (1-365)",
                     "include_unassigned_in_assignee_lists": "Include unassigned tasks in assignee lists",
+                    "auto_complete_past_due_recurrent": "Auto-complete past due recurring tasks at midnight",
                     "notify_on_past_due": "Send notifications when tasks become past due"
                 }
             },
@@ -69,6 +70,7 @@
                     "refresh_interval": "Sync interval",
                     "upcoming_days": "Only show upcoming tasks within this many days (1-365)",
                     "include_unassigned_in_assignee_lists": "Include unassigned tasks in assignee lists",
+                    "auto_complete_past_due_recurrent": "Auto-complete past due recurring tasks at midnight",
                     "notify_on_past_due": "Send notifications when tasks become past due"
                 }
             },

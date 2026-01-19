@@ -14,12 +14,17 @@
                 "description": "Choose how you'd like to organize your Donetick tasks in Home Assistant",
                 "data": {
                     "show_due_in": "Days ahead to show upcoming tasks",
-                    "create_unified_list": "Create \"All Tasks\" list",
+                    "create_unified_list": "Create 'All Tasks' list",
                     "create_assignee_lists": "Create individual task lists per person",
                     "create_date_filtered_lists": "Create date-filtered sub-lists (Past Due, Due Today, Upcoming)",
                     "create_time_of_day_lists": "Create time-of-day sub-lists (Morning, Afternoon, Evening, All Day)",
                     "morning_cutoff": "Morning ends at",
-                    "afternoon_cutoff": "Afternoon ends at"
+                    "afternoon_cutoff": "Afternoon ends at",
+                    "refresh_interval": "Sync interval",
+                    "upcoming_days": "Only show upcoming tasks within this many days (1-365)",
+                    "include_unassigned_in_assignee_lists": "Include unassigned tasks in assignee lists",
+                    "auto_complete_past_due_recurrent": "Auto-complete past due recurring tasks at midnight",
+                    "notify_on_past_due": "Send notifications when tasks become past due"
                 }
             }
         }
@@ -31,12 +36,17 @@
                 "description": "Adjust your Donetick integration settings",
                 "data": {
                     "show_due_in": "Days ahead to show upcoming tasks",
-                    "create_unified_list": "Create \"All Tasks\" list",
+                    "create_unified_list": "Create 'All Tasks' list",
                     "create_assignee_lists": "Create individual task lists per person",
                     "create_date_filtered_lists": "Create date-filtered sub-lists (Past Due, Due Today, Upcoming)",
                     "create_time_of_day_lists": "Create time-of-day sub-lists (Morning, Afternoon, Evening, All Day)",
                     "morning_cutoff": "Morning ends at",
-                    "afternoon_cutoff": "Afternoon ends at"
+                    "afternoon_cutoff": "Afternoon ends at",
+                    "refresh_interval": "Sync interval",
+                    "upcoming_days": "Only show upcoming tasks within this many days (1-365)",
+                    "include_unassigned_in_assignee_lists": "Include unassigned tasks in assignee lists",
+                    "auto_complete_past_due_recurrent": "Auto-complete past due recurring tasks at midnight",
+                    "notify_on_past_due": "Send notifications when tasks become past due"
                 }
             }
         }

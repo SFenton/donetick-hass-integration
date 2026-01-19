@@ -48,6 +48,7 @@ from .const import (
     CONF_AFTERNOON_CUTOFF,
     DEFAULT_MORNING_CUTOFF,
     DEFAULT_AFTERNOON_CUTOFF,
+    CONF_AUTO_COMPLETE_PAST_DUE,
 )
 from .api import DonetickApiClient, AuthenticationError
 
@@ -271,6 +272,7 @@ class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_NOTIFY_ON_PAST_DUE: user_input.get(CONF_NOTIFY_ON_PAST_DUE, False),
                 CONF_UPCOMING_DAYS: user_input.get(CONF_UPCOMING_DAYS, DEFAULT_UPCOMING_DAYS),
                 CONF_INCLUDE_UNASSIGNED: user_input.get(CONF_INCLUDE_UNASSIGNED, False),
+                CONF_AUTO_COMPLETE_PAST_DUE: user_input.get(CONF_AUTO_COMPLETE_PAST_DUE, False),
             }
             
             # If notifications enabled and we have circle members, proceed to notification config
@@ -307,6 +309,7 @@ class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Coerce(int), vol.Range(min=MIN_UPCOMING_DAYS, max=MAX_UPCOMING_DAYS)
                 ),
                 vol.Optional(CONF_INCLUDE_UNASSIGNED, default=False): bool,
+                vol.Optional(CONF_AUTO_COMPLETE_PAST_DUE, default=False): bool,
                 vol.Optional(CONF_NOTIFY_ON_PAST_DUE, default=False): bool,
             }),
         )
@@ -407,6 +410,7 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_NOTIFY_ON_PAST_DUE: user_input.get(CONF_NOTIFY_ON_PAST_DUE, False),
                 CONF_UPCOMING_DAYS: user_input.get(CONF_UPCOMING_DAYS, DEFAULT_UPCOMING_DAYS),
                 CONF_INCLUDE_UNASSIGNED: user_input.get(CONF_INCLUDE_UNASSIGNED, False),
+                CONF_AUTO_COMPLETE_PAST_DUE: user_input.get(CONF_AUTO_COMPLETE_PAST_DUE, False),
             }
             
             # Preserve auth credentials based on auth type
@@ -493,6 +497,10 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_INCLUDE_UNASSIGNED,
                     default=self.entry.data.get(CONF_INCLUDE_UNASSIGNED, False)
+                ): bool,
+                vol.Optional(
+                    CONF_AUTO_COMPLETE_PAST_DUE,
+                    default=self.entry.data.get(CONF_AUTO_COMPLETE_PAST_DUE, False)
                 ): bool,
                 vol.Optional(
                     CONF_NOTIFY_ON_PAST_DUE,
