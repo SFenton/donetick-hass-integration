@@ -2726,10 +2726,10 @@ class TestUpcomingTodayByTimeAndFutureList:
     def test_evening_task_shown_when_in_evening_period(
         self, mock_coordinator, mock_config_entry, mock_hass, sample_chore_json
     ):
-        """Test that evening tasks are shown when current time is in evening period.
+        """Test that evening tasks are NOT shown in Upcoming when in evening period.
         
-        Regression test: Evening tasks were being excluded because next_boundary is None
-        when we're in the evening period.
+        Bugfix test: Evening tasks were incorrectly appearing in the "Upcoming Today By Time And Future"
+        list during the evening period. They should only appear in the "Evening" list.
         """
         tz = ZoneInfo("America/New_York")
         # Current time is 8 PM (evening period, after afternoon cutoff)
@@ -2747,9 +2747,8 @@ class TestUpcomingTodayByTimeAndFutureList:
         
         filtered = entity._filter_tasks([task])
         
-        # The 11 PM task should be included (it's after 8 PM)
-        assert len(filtered) == 1
-        assert filtered[0].id == task.id
+        # The 11 PM task should NOT be included - it belongs in Evening list, not Upcoming
+        assert len(filtered) == 0
 
     def test_afternoon_task_shown_when_in_morning_period(
         self, mock_coordinator, mock_config_entry, mock_hass, sample_chore_json
@@ -2847,7 +2846,11 @@ class TestUpcomingTodayByTimeAndFutureList:
     def test_multiple_evening_tasks_all_shown(
         self, mock_coordinator, mock_config_entry, mock_hass, sample_chore_json
     ):
-        """Test that multiple evening tasks are all shown when in evening period."""
+        """Test that evening tasks are NOT shown in Upcoming when in evening period.
+        
+        During evening period, today's evening tasks should only appear in Evening list,
+        not in the Upcoming list.
+        """
         tz = ZoneInfo("America/New_York")
         now = datetime(2024, 1, 15, 19, 0, 0, tzinfo=tz)  # 7 PM
         
@@ -2873,5 +2876,63 @@ class TestUpcomingTodayByTimeAndFutureList:
         
         filtered = entity._filter_tasks([task1, task2, task3])
         
-        # All 3 tasks should be included
-        assert len(filtered) == 3
+        # No tasks should be included - they're all today evening tasks during evening period
+        assert len(filtered) == 0
+
+    def test_evening_tasks_not_duplicated_during_evening_period(
+        self, mock_coordinator, mock_config_entry, mock_hass, sample_chore_json
+    ):
+        """Test that evening tasks don't appear in Upcoming list during evening period.
+        
+        Regression test for bug where tasks due later in the evening appeared in both:
+        - "Upcoming Today By Time And Future" list
+        - "Evening" list
+        
+        During evening period (after afternoon cutoff), the Upcoming list should only
+        show future tasks (tomorrow and beyond), NOT today's evening tasks.
+        """
+        tz = ZoneInfo("America/New_York")
+        # Current time is 7 PM (evening period, after afternoon cutoff at 5 PM)
+        now = datetime(2024, 1, 15, 19, 0, 0, tzinfo=tz)
+        
+        # Task due at 9 PM today (still in the future, but part of "evening")
+        evening_task = self._create_task_with_due_time(
+            sample_chore_json, "2024-01-15T21:00:00-05:00"
+        )
+        
+        # Task due tomorrow (this should be shown)
+        tomorrow_task_data = sample_chore_json.copy()
+        tomorrow_task_data["id"] = 101
+        tomorrow_task_data["nextDueDate"] = "2024-01-16T13:00:00-05:00"
+        tomorrow_task_data["assignedTo"] = None
+        tomorrow_task_data["frequencyType"] = "once"
+        tomorrow_task = DonetickTask.from_json(tomorrow_task_data)
+        
+        mock_coordinator.tasks_list = [evening_task, tomorrow_task]
+        
+        # Test the Upcoming Today By Time And Future list
+        upcoming_entity = self._create_entity_with_mocked_time(
+            mock_coordinator, mock_config_entry, mock_hass, now
+        )
+        
+        upcoming_filtered = upcoming_entity._filter_tasks([evening_task, tomorrow_task])
+        
+        # During evening period, only tomorrow's task should be in Upcoming list
+        # The 9 PM task should NOT be included (it belongs in Evening list)
+        assert len(upcoming_filtered) == 1
+        assert upcoming_filtered[0].id == tomorrow_task.id
+        
+        # Verify the evening task would appear in the Evening list
+        from custom_components.donetick.todo import DonetickTimeOfDayTasksList
+        evening_entity = DonetickTimeOfDayTasksList(
+            mock_coordinator, mock_config_entry, mock_hass, "evening", member=None
+        )
+        evening_entity._get_local_now = lambda: now
+        evening_entity._get_local_today_start = lambda: now.replace(hour=0, minute=0, second=0, microsecond=0)
+        evening_entity._get_local_today_end = lambda: now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        
+        evening_filtered = evening_entity._filter_tasks([evening_task, tomorrow_task])
+        
+        # The 9 PM task should be in the Evening list
+        assert len(evening_filtered) == 1
+        assert evening_filtered[0].id == evening_task.id
