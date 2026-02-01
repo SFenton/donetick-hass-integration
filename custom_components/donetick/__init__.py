@@ -243,6 +243,9 @@ CREATE_TASK_SCHEMA = vol.Schema({
     vol.Optional("description"): cv.string,
     vol.Optional("due_date"): cv.string,
     vol.Optional("created_by"): cv.positive_int,
+    # Optional: when enabled, only create if no active assigned task with the same name exists.
+    # Defaults to False when omitted.
+    vol.Optional("active_task_name_exclusivity"): cv.boolean,
     vol.Optional("priority"): vol.All(vol.Coerce(int), vol.Range(min=0, max=3)),
     vol.Optional("frequency_type"): vol.In([
         "once", "daily", "weekly", "monthly", "yearly",
@@ -483,6 +486,10 @@ async def async_create_task_service(hass: HomeAssistant, call: ServiceCall) -> N
     due_date = call.data.get("due_date")
     created_by = call.data.get("created_by")
     config_entry_id = call.data.get("config_entry_id")
+
+    # Optional behavior gate: prevent creating duplicates by name.
+    # Defaults to False unless explicitly set.
+    active_task_name_exclusivity = call.data.get("active_task_name_exclusivity", False)
     
     # Enhanced fields (only work with JWT auth)
     priority = call.data.get("priority")
@@ -511,6 +518,17 @@ async def async_create_task_service(hass: HomeAssistant, call: ServiceCall) -> N
     
     # Get API client
     client = _get_api_client(hass, entry.entry_id)
+
+    # If exclusivity is enabled, check for any matching active assigned tasks.
+    if active_task_name_exclusivity:
+        matches = await client.async_get_active_tasks_by_name(name, require_assigned=True)
+        if matches:
+            _LOGGER.info(
+                "Not creating task '%s' because %d active task(s) with the same name already exist",
+                name,
+                len(matches),
+            )
+            return
     
     try:
         result = await client.async_create_task(

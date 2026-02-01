@@ -548,6 +548,71 @@ class TestCreateTaskService:
                 call_kwargs = mock_client.async_create_task.call_args[1]
                 assert call_kwargs["assignees"] == [42, 43, 44]
 
+    @pytest.mark.asyncio
+    async def test_create_task_exclusivity_blocks_when_match_exists(self, mock_hass, sample_chore_json):
+        """When exclusivity is enabled, do not create if an active assigned same-name task exists."""
+        call = MagicMock()
+        call.data = {
+            "name": "Test Task",
+            "active_task_name_exclusivity": True,
+        }
+
+        existing_task_json = {**sample_chore_json}
+        existing_task_json["name"] = "Test Task"
+        existing_task_json["isActive"] = True
+        existing_task_json["assignedTo"] = 99
+        existing_task_json["assignees"] = [{"userId": 99}]
+        existing_task = DonetickTask.from_json(existing_task_json)
+
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_client.async_get_active_tasks_by_name = AsyncMock(return_value=[existing_task])
+                mock_client.async_create_task = AsyncMock()
+                mock_get_client.return_value = mock_client
+
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock) as mock_refresh:
+                    await async_create_task_service(mock_hass, call)
+
+                mock_client.async_get_active_tasks_by_name.assert_called_once()
+                mock_client.async_create_task.assert_not_called()
+                mock_refresh.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_task_exclusivity_allows_when_no_match(self, mock_hass, sample_chore_json):
+        """When exclusivity is enabled, create if there is no matching active assigned task."""
+        call = MagicMock()
+        call.data = {
+            "name": "Test Task",
+            "active_task_name_exclusivity": True,
+        }
+
+        created_task_json = {**sample_chore_json}
+        created_task_json["name"] = "Test Task"
+        created_task = DonetickTask.from_json(created_task_json)
+
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_client.async_get_active_tasks_by_name = AsyncMock(return_value=[])
+                mock_client.async_create_task = AsyncMock(return_value=created_task)
+                mock_get_client.return_value = mock_client
+
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock) as mock_refresh:
+                    await async_create_task_service(mock_hass, call)
+
+                mock_client.async_get_active_tasks_by_name.assert_called_once()
+                mock_client.async_create_task.assert_called_once()
+                mock_refresh.assert_called_once()
+
 
 class TestUpdateTaskService:
     """Tests for async_update_task_service."""

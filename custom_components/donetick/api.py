@@ -29,6 +29,18 @@ class AuthenticationError(Exception):
 class DonetickApiClient:
     """API client for Donetick with JWT authentication."""
 
+    @staticmethod
+    def _normalize_task_name(name: str) -> str:
+        """Normalize task names for comparisons.
+
+        - Strips leading/trailing whitespace
+        - Collapses internal whitespace
+        - Case-folds for case-insensitive comparisons
+        """
+        if name is None:
+            return ""
+        return " ".join(str(name).split()).casefold()
+
     def __init__(
         self,
         base_url: str,
@@ -278,6 +290,38 @@ class DonetickApiClient:
         except (KeyError, ValueError, json.JSONDecodeError) as err:
             _LOGGER.error("Error parsing Donetick response: %s", err)
             return []
+
+    async def async_get_active_tasks_by_name(self, name: str, require_assigned: bool = True) -> List[DonetickTask]:
+        """Return active tasks whose names match the provided name.
+
+        Donetick's REST API doesn't currently expose a direct "search by name" endpoint
+        for chores; we fetch the active chore list and filter client-side.
+
+        Args:
+            name: Task name to match (case-insensitive, normalized whitespace).
+            require_assigned: If True, only return tasks that are assigned to someone.
+        """
+        target = self._normalize_task_name(name)
+        if not target:
+            return []
+
+        tasks = await self.async_get_tasks()
+        matches: List[DonetickTask] = []
+        for task in tasks:
+            if not task.is_active:
+                continue
+            if self._normalize_task_name(task.name) != target:
+                continue
+
+            if require_assigned:
+                assigned_to_someone = (task.assigned_to is not None and task.assigned_to != 0)
+                has_assignees = bool(task.assignees)
+                if not (assigned_to_someone or has_assignees):
+                    continue
+
+            matches.append(task)
+
+        return matches
 
     async def async_get_circle_members(self) -> List[DonetickMember]:
         """Get circle members from Donetick."""

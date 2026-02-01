@@ -261,12 +261,91 @@ class TestDonetickApiClientGetTasks:
         mock_response.raise_for_status = MagicMock()
         mock_response.__aenter__ = AsyncMock(return_value=mock_response)
         mock_response.__aexit__ = AsyncMock(return_value=None)
-        
+
         authenticated_client._session.request = MagicMock(return_value=mock_response)
-        
+
         tasks = await authenticated_client.async_get_tasks()
-        
+
         assert tasks == []
+
+
+class TestDonetickApiClientGetActiveTasksByName:
+    """Tests for async_get_active_tasks_by_name helper."""
+
+    @pytest.fixture
+    def authenticated_client(self, mock_aiohttp_session):
+        """Create authenticated client."""
+        client = DonetickApiClient(
+            base_url="https://donetick.example.com",
+            session=mock_aiohttp_session,
+            auth_type=AUTH_TYPE_JWT,
+            username="testuser",
+            password="testpass",
+        )
+        client._jwt_token = "valid_token"
+        client._jwt_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+        return client
+
+    @pytest.mark.asyncio
+    async def test_get_active_tasks_by_name_filters_active_and_assigned(self, authenticated_client, sample_chore_json):
+        """Should return only active tasks with matching name that are assigned to someone."""
+        # Matching active + assigned
+        t1 = DonetickTask.from_json({
+            **sample_chore_json,
+            "id": 1,
+            "name": "Test Task",
+            "isActive": True,
+            "assignedTo": 10,
+            "assignees": [{"userId": 10}],
+        })
+        # Matching but not assigned
+        t2 = DonetickTask.from_json({
+            **sample_chore_json,
+            "id": 2,
+            "name": "Test Task",
+            "isActive": True,
+            "assignedTo": 0,
+            "assignees": [],
+        })
+        # Matching but inactive
+        t3 = DonetickTask.from_json({
+            **sample_chore_json,
+            "id": 3,
+            "name": "Test Task",
+            "isActive": False,
+            "assignedTo": 11,
+            "assignees": [{"userId": 11}],
+        })
+        # Different name
+        t4 = DonetickTask.from_json({
+            **sample_chore_json,
+            "id": 4,
+            "name": "Other Task",
+            "isActive": True,
+            "assignedTo": 12,
+            "assignees": [{"userId": 12}],
+        })
+
+        authenticated_client.async_get_tasks = AsyncMock(return_value=[t1, t2, t3, t4])
+
+        matches = await authenticated_client.async_get_active_tasks_by_name("  test   task ")
+        assert [t.id for t in matches] == [1]
+
+    @pytest.mark.asyncio
+    async def test_get_active_tasks_by_name_can_include_unassigned(self, authenticated_client, sample_chore_json):
+        """When require_assigned is False, include matching active tasks even if unassigned."""
+        t1 = DonetickTask.from_json({
+            **sample_chore_json,
+            "id": 1,
+            "name": "Test Task",
+            "isActive": True,
+            "assignedTo": 0,
+            "assignees": [],
+        })
+        authenticated_client.async_get_tasks = AsyncMock(return_value=[t1])
+
+        matches = await authenticated_client.async_get_active_tasks_by_name("test task", require_assigned=False)
+        assert [t.id for t in matches] == [1]
 
 
 class TestDonetickApiClientGetMembers:

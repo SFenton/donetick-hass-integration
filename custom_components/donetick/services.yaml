@@ -134,6 +134,12 @@ create_task:
       required: false
       selector:
         boolean:
+    active_task_name_exclusivity:
+      name: Only Create If No Active Same-Name Task
+      description: If true, only create this task if there are no other active tasks (assigned to anyone) with the same name.
+      required: false
+      selector:
+        boolean:
     config_entry_id:
       name: Config Entry ID
       description: The specific Donetick integration to use (optional, uses first if not specified)
