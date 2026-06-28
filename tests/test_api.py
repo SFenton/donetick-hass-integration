@@ -499,6 +499,28 @@ class TestDonetickApiClientTaskOperations:
         with pytest.raises(NotImplementedError):
             await client.async_set_task_notifications([1], False)
 
+    @pytest.mark.asyncio
+    async def test_update_task_merges_with_current_task_for_jwt_put(self, authenticated_client, sample_chore_json):
+        """JWT updates should send a full task payload, not only changed fields."""
+        existing_task = DonetickTask.from_json(sample_chore_json)
+        authenticated_client.async_get_tasks = AsyncMock(return_value=[existing_task])
+        authenticated_client._request = AsyncMock(return_value=sample_chore_json)
+
+        await authenticated_client.async_update_task(task_id=existing_task.id, notification=False)
+
+        authenticated_client._request.assert_called_once()
+        method, endpoint = authenticated_client._request.call_args.args[:2]
+        payload = authenticated_client._request.call_args.kwargs["json_data"]
+        assert method == "PUT"
+        assert endpoint == "/api/v1/chores/"
+        assert payload["id"] == existing_task.id
+        assert payload["name"] == existing_task.name
+        assert payload["frequencyType"] == existing_task.frequency_type
+        assert payload["assignStrategy"] == existing_task.assign_strategy
+        assert payload["assignees"] == [{"userId": 42}, {"userId": 43}]
+        assert payload["notification"] is False
+        assert payload["notificationMetadata"] == existing_task.notification_metadata
+
 
 class TestDonetickApiClientThingOperations:
     """Tests for thing state operations."""

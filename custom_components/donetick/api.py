@@ -323,6 +323,41 @@ class DonetickApiClient:
 
         return matches
 
+    def _task_update_payload(self, task: DonetickTask) -> dict:
+        """Build a full update payload from an existing task."""
+        payload = {
+            "id": task.id,
+            "name": task.name,
+            "frequencyType": task.frequency_type or FREQUENCY_ONCE,
+            "frequency": task.frequency,
+            "assignees": [{"userId": assignee.user_id} for assignee in (task.assignees or [])],
+        }
+        if task.description is not None:
+            payload["description"] = task.description
+        if task.next_due_date is not None:
+            payload["nextDueDate"] = task.next_due_date.isoformat()
+        if task.assigned_to is not None:
+            payload["assignedTo"] = task.assigned_to
+        if task.assign_strategy:
+            payload["assignStrategy"] = task.assign_strategy
+        elif not task.assignees:
+            payload["assignStrategy"] = "no_assignee"
+        if task.priority is not None:
+            payload["priority"] = task.priority
+        if task.points is not None:
+            payload["points"] = task.points
+        if task.labels_v2 is not None:
+            payload["labelsV2"] = [{"id": label.id} for label in task.labels_v2]
+        payload["notification"] = task.notification
+        payload["notificationMetadata"] = task.notification_metadata or {}
+        payload["isRolling"] = task.is_rolling
+        payload["isActive"] = task.is_active
+        payload["requireApproval"] = task.require_approval
+        payload["isPrivate"] = task.is_private
+        if task.completion_window is not None:
+            payload["completionWindow"] = task.completion_window
+        return payload
+
     async def async_get_circle_members(self) -> List[DonetickMember]:
         """Get circle members from Donetick."""
         if self.is_jwt_auth:
@@ -613,10 +648,12 @@ class DonetickApiClient:
             next_due_date: The next occurrence date (for snoozing/rescheduling)
         """
         if self.is_jwt_auth:
-            # First get the current task to merge with updates
-            # The internal API requires the full ChoreReq for PUT
-            payload = {"id": task_id}
-            
+            # The internal API requires the full ChoreReq for PUT, so merge
+            # partial service data into the current task before sending.
+            tasks = await self.async_get_tasks()
+            current_task = next((task for task in tasks if task.id == task_id), None)
+            payload = self._task_update_payload(current_task) if current_task else {"id": task_id}
+             
             if name:
                 payload["name"] = name
             if description is not None:
