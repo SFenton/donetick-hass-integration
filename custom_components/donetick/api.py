@@ -685,6 +685,20 @@ class DonetickApiClient:
         _LOGGER.debug("Update task response: %s", data)
         return DonetickTask.from_json(data)
 
+    async def async_set_task_notifications(
+        self,
+        task_ids: List[int],
+        notification: bool,
+    ) -> List[DonetickTask]:
+        """Enable or disable notifications for multiple tasks."""
+        if not self.is_jwt_auth:
+            raise NotImplementedError("Task notification updates are only available with JWT authentication")
+
+        updated_tasks: List[DonetickTask] = []
+        for task_id in task_ids:
+            updated_tasks.append(await self.async_update_task(task_id=task_id, notification=notification))
+        return updated_tasks
+
     async def async_delete_task(self, task_id: int) -> bool:
         """Delete a task."""
         if self.is_jwt_auth:

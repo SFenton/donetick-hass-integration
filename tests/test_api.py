@@ -1,7 +1,7 @@
 """Unit tests for custom_components.donetick.api module."""
 import pytest
 from datetime import datetime, timezone, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 import aiohttp
 
 import sys
@@ -470,6 +470,34 @@ class TestDonetickApiClientTaskOperations:
         result = await authenticated_client.async_complete_task(chore_id=1)
         
         assert isinstance(result, DonetickTask)
+
+    @pytest.mark.asyncio
+    async def test_set_task_notifications_updates_each_task(self, authenticated_client, sample_chore_json):
+        """Test bulk notification updates."""
+        updated_task = DonetickTask.from_json(sample_chore_json)
+        authenticated_client.async_update_task = AsyncMock(return_value=updated_task)
+
+        result = await authenticated_client.async_set_task_notifications([1, 2, 3], False)
+
+        assert result == [updated_task, updated_task, updated_task]
+        assert authenticated_client.async_update_task.call_args_list == [
+            call(task_id=1, notification=False),
+            call(task_id=2, notification=False),
+            call(task_id=3, notification=False),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_set_task_notifications_requires_jwt(self, mock_aiohttp_session):
+        """Bulk notification updates require JWT auth."""
+        client = DonetickApiClient(
+            base_url="https://donetick.example.com",
+            session=mock_aiohttp_session,
+            auth_type=AUTH_TYPE_API_KEY,
+            api_token="test_api_key",
+        )
+
+        with pytest.raises(NotImplementedError):
+            await client.async_set_task_notifications([1], False)
 
 
 class TestDonetickApiClientThingOperations:

@@ -17,6 +17,7 @@ from custom_components.donetick import (
     async_update_task_service,
     async_delete_task_service,
     async_create_task_form_service,
+    async_set_task_notifications_service,
     normalize_datetime_string,
     is_time_only_string,
     calculate_next_occurrence_for_time,
@@ -26,10 +27,12 @@ from custom_components.donetick import (
     CREATE_TASK_SCHEMA,
     UPDATE_TASK_SCHEMA,
     DELETE_TASK_SCHEMA,
+    SET_TASK_NOTIFICATIONS_SCHEMA,
     SERVICE_COMPLETE_TASK,
     SERVICE_CREATE_TASK,
     SERVICE_UPDATE_TASK,
     SERVICE_DELETE_TASK,
+    SERVICE_SET_TASK_NOTIFICATIONS,
 )
 from custom_components.donetick.const import (
     DOMAIN,
@@ -168,6 +171,20 @@ class TestServiceSchemas:
         assert validated["task_id"] == 1
         assert validated["name"] == "Updated Task"
 
+    def test_set_task_notifications_schema_valid_list(self):
+        """Test set_task_notifications schema with a task ID list."""
+        data = {"task_ids": [1, 2, 3], "notification": False}
+        validated = SET_TASK_NOTIFICATIONS_SCHEMA(data)
+        assert validated["task_ids"] == [1, 2, 3]
+        assert validated["notification"] is False
+
+    def test_set_task_notifications_schema_valid_string(self):
+        """Test set_task_notifications schema with comma-separated task IDs."""
+        data = {"task_ids": "1,2,3", "notification": True}
+        validated = SET_TASK_NOTIFICATIONS_SCHEMA(data)
+        assert validated["task_ids"] == "1,2,3"
+        assert validated["notification"] is True
+
     def test_delete_task_schema_valid(self):
         """Test valid delete_task schema."""
         data = {"task_id": 1}
@@ -221,7 +238,7 @@ class TestAsyncSetupEntry:
         assert mock_config_entry.entry_id in mock_hass.data[DOMAIN]
         
         # Check services were registered
-        assert mock_hass.services.async_register.call_count == 5
+        assert mock_hass.services.async_register.call_count == 6
 
     @pytest.mark.asyncio
     async def test_setup_entry_generates_webhook_id(self, mock_hass, mock_config_entry):
@@ -310,8 +327,8 @@ class TestAsyncUnloadEntry:
         with patch('custom_components.donetick.async_unregister_webhook', new_callable=AsyncMock):
             await async_unload_entry(mock_hass, mock_config_entry)
         
-        # Check services were removed (5 services)
-        assert mock_hass.services.async_remove.call_count == 5
+        # Check services were removed (6 services)
+        assert mock_hass.services.async_remove.call_count == 6
 
 
 class TestGetApiClient:
@@ -697,6 +714,48 @@ class TestDeleteTaskService:
                     await async_delete_task_service(mock_hass, mock_call)
                 
                 mock_client.async_delete_task.assert_called_once_with(1)
+
+
+class TestSetTaskNotificationsService:
+    """Tests for async_set_task_notifications_service."""
+
+    @pytest.fixture
+    def mock_hass(self):
+        """Create mock Home Assistant instance."""
+        hass = MagicMock()
+        hass.data = {DOMAIN: {"test_entry_id": {
+            CONF_URL: "https://donetick.example.com",
+            CONF_AUTH_TYPE: AUTH_TYPE_JWT,
+        }}}
+        return hass
+
+    @pytest.mark.asyncio
+    async def test_set_task_notifications_success(self, mock_hass):
+        """Test successful bulk task notification update."""
+        call = MagicMock()
+        call.data = {
+            "task_ids": "1, 2,3",
+            "notification": False,
+        }
+
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_client.async_set_task_notifications = AsyncMock(return_value=[])
+                mock_get_client.return_value = mock_client
+
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock) as mock_refresh:
+                    await async_set_task_notifications_service(mock_hass, call)
+
+                mock_client.async_set_task_notifications.assert_called_once_with(
+                    task_ids=[1, 2, 3],
+                    notification=False,
+                )
+                mock_refresh.assert_called_once_with(mock_hass, "test_entry_id")
 
 
 class TestNormalizeDatetimeString:

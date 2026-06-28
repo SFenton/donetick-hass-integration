@@ -28,6 +28,7 @@ A Home Assistant integration for Donetick that provides support for managing tod
 - `donetick.update_task` - Update existing tasks  
 - `donetick.delete_task` - Delete tasks
 - `donetick.complete_task` - Mark tasks complete with user attribution
+- `donetick.set_task_notifications` - Enable or disable notifications for multiple tasks
 
 ## Installation
 

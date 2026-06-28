@@ -231,6 +231,7 @@ SERVICE_CREATE_TASK = "create_task"
 SERVICE_UPDATE_TASK = "update_task"
 SERVICE_DELETE_TASK = "delete_task"
 SERVICE_CREATE_TASK_FORM = "create_task_form"
+SERVICE_SET_TASK_NOTIFICATIONS = "set_task_notifications"
 
 COMPLETE_TASK_SCHEMA = vol.Schema({
     vol.Required("task_id"): cv.positive_int,
@@ -284,6 +285,12 @@ UPDATE_TASK_SCHEMA = vol.Schema({
     vol.Optional("notification"): cv.boolean,
     vol.Optional("require_approval"): cv.boolean,
     vol.Optional("is_private"): cv.boolean,
+    vol.Optional("config_entry_id"): cv.string,
+})
+
+SET_TASK_NOTIFICATIONS_SCHEMA = vol.Schema({
+    vol.Required("task_ids"): vol.Any(cv.string, [cv.positive_int]),
+    vol.Required("notification"): cv.boolean,
     vol.Optional("config_entry_id"): cv.string,
 })
 
@@ -370,6 +377,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     
     async def create_task_form_handler(call: ServiceCall) -> None:
         await async_create_task_form_service(hass, call)
+
+    async def set_task_notifications_handler(call: ServiceCall) -> None:
+        await async_set_task_notifications_service(hass, call)
     
     hass.services.async_register(
         DOMAIN,
@@ -401,10 +411,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         create_task_form_handler,
         schema=CREATE_TASK_FORM_SCHEMA,
     )
-    _LOGGER.debug("Registered services: %s.%s, %s.%s, %s.%s, %s.%s, %s.%s", 
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_TASK_NOTIFICATIONS,
+        set_task_notifications_handler,
+        schema=SET_TASK_NOTIFICATIONS_SCHEMA,
+    )
+    _LOGGER.debug("Registered services: %s.%s, %s.%s, %s.%s, %s.%s, %s.%s, %s.%s",
                   DOMAIN, SERVICE_COMPLETE_TASK, DOMAIN, SERVICE_CREATE_TASK, 
                   DOMAIN, SERVICE_UPDATE_TASK, DOMAIN, SERVICE_DELETE_TASK,
-                  DOMAIN, SERVICE_CREATE_TASK_FORM)
+                  DOMAIN, SERVICE_CREATE_TASK_FORM, DOMAIN, SERVICE_SET_TASK_NOTIFICATIONS)
     
     # Register event listener for notification actions
     async def handle_notification_action(event):
@@ -613,6 +629,45 @@ async def async_update_task_service(hass: HomeAssistant, call: ServiceCall) -> N
                     
     except Exception as e:
         _LOGGER.error("Failed to update task %d: %s", task_id, e)
+
+
+def _parse_task_ids(task_ids_value) -> list[int]:
+    """Parse task IDs from a YAML list or comma-separated string."""
+    if isinstance(task_ids_value, str):
+        raw_task_ids = [value.strip() for value in task_ids_value.split(",")]
+    else:
+        raw_task_ids = task_ids_value
+
+    task_ids: list[int] = []
+    for raw_task_id in raw_task_ids:
+        if raw_task_id in ("", None):
+            continue
+        task_ids.append(int(raw_task_id))
+    return task_ids
+
+
+async def async_set_task_notifications_service(hass: HomeAssistant, call: ServiceCall) -> None:
+    """Handle the set_task_notifications service call."""
+    task_ids = _parse_task_ids(call.data["task_ids"])
+    notification = call.data["notification"]
+    config_entry_id = call.data.get("config_entry_id")
+
+    if not task_ids:
+        _LOGGER.error("At least one task ID is required")
+        raise vol.Invalid("At least one task ID is required")
+
+    entry = await _get_config_entry(hass, config_entry_id)
+    if not entry:
+        return
+
+    client = _get_api_client(hass, entry.entry_id)
+
+    try:
+        await client.async_set_task_notifications(task_ids=task_ids, notification=notification)
+        _LOGGER.info("Set notifications=%s for Donetick tasks %s", notification, task_ids)
+        await _refresh_todo_entities(hass, entry.entry_id)
+    except Exception as e:
+        _LOGGER.error("Failed to set notifications=%s for Donetick tasks %s: %s", notification, task_ids, e)
 
 async def async_delete_task_service(hass: HomeAssistant, call: ServiceCall) -> None:
     """Handle the delete_task service call."""
@@ -1050,13 +1105,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         
         # Remove services if this is the last config entry
         if not hass.data[DOMAIN]:
-            for service_name in [SERVICE_COMPLETE_TASK, SERVICE_CREATE_TASK, SERVICE_UPDATE_TASK, SERVICE_DELETE_TASK, SERVICE_CREATE_TASK_FORM]:
+            for service_name in [SERVICE_COMPLETE_TASK, SERVICE_CREATE_TASK, SERVICE_UPDATE_TASK, SERVICE_DELETE_TASK, SERVICE_CREATE_TASK_FORM, SERVICE_SET_TASK_NOTIFICATIONS]:
                 if hass.services.has_service(DOMAIN, service_name):
                     hass.services.async_remove(DOMAIN, service_name)
-            _LOGGER.debug("Removed services: %s.%s, %s.%s, %s.%s, %s.%s, %s.%s", 
+            _LOGGER.debug("Removed services: %s.%s, %s.%s, %s.%s, %s.%s, %s.%s, %s.%s",
                           DOMAIN, SERVICE_COMPLETE_TASK, DOMAIN, SERVICE_CREATE_TASK, 
                           DOMAIN, SERVICE_UPDATE_TASK, DOMAIN, SERVICE_DELETE_TASK,
-                          DOMAIN, SERVICE_CREATE_TASK_FORM)
+                          DOMAIN, SERVICE_CREATE_TASK_FORM, DOMAIN, SERVICE_SET_TASK_NOTIFICATIONS)
     
     return unload_ok
 

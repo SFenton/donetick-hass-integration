@@ -263,6 +263,29 @@ update_task:
       selector:
         text:
 
+set_task_notifications:
+  name: Set Task Notifications
+  description: Enable or disable notifications for multiple Donetick tasks. Requires username/password authentication.
+  fields:
+    task_ids:
+      name: Task IDs
+      description: Donetick task IDs as a YAML list or comma-separated string.
+      required: true
+      selector:
+        text:
+    notification:
+      name: Enable Notifications
+      description: Whether notifications should be enabled for the selected tasks.
+      required: true
+      selector:
+        boolean:
+    config_entry_id:
+      name: Config Entry ID
+      description: The specific Donetick integration to use (optional, uses first if not specified)
+      required: false
+      selector:
+        text:
+
 delete_task:
   name: Delete Task
   description: Delete a Donetick task
