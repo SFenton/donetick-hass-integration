@@ -497,6 +497,14 @@ class AutoCompletionManager:
 _notification_reminders: dict[int, tuple[Callable, datetime]] = {}
 
 
+def _notification_task_id_from_key(task_key: Any) -> int | None:
+    """Extract the Donetick task ID from a notification store key."""
+    try:
+        return int(str(task_key).split(":", 1)[0])
+    except (TypeError, ValueError):
+        return None
+
+
 class NotificationManager:
     """Manages past-due notifications for tasks."""
     
@@ -921,6 +929,10 @@ class NotificationStore:
         task_key = str(task_id)
         if task_key in self._data:
             del self._data[task_key]
+
+    def clear_task_key(self, task_key: str) -> None:
+        """Remove an exact notification store key."""
+        self._data.pop(str(task_key), None)
     
     def prune_old_entries(self, current_task_ids: set[int]) -> int:
         """Remove entries for tasks that no longer exist or are no longer past due.
@@ -1650,8 +1662,9 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         if self._notification_store:
             # Get all task IDs we've been tracking
             for task_key in list(self._notification_store._data.keys()):
-                task_id = int(task_key)
-                NotificationManager.cancel_reminder(task_id, is_unassigned=is_unassigned)
+                task_id = _notification_task_id_from_key(task_key)
+                if task_id is not None:
+                    NotificationManager.cancel_reminder(task_id, is_unassigned=is_unassigned)
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -1685,11 +1698,16 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         is_unassigned = self._member is None
         
         # Prune stale entries and cancel their reminders
-        stale_task_keys = set(self._notification_store._data.keys()) - {str(tid) for tid in current_task_ids}
+        stale_task_keys = {
+            task_key
+            for task_key in self._notification_store._data
+            if _notification_task_id_from_key(task_key) not in current_task_ids
+        }
         for task_key in stale_task_keys:
-            task_id = int(task_key)
-            NotificationManager.cancel_reminder(task_id, is_unassigned=is_unassigned)
-            self._notification_store.clear_task(task_id)
+            task_id = _notification_task_id_from_key(task_key)
+            if task_id is not None:
+                NotificationManager.cancel_reminder(task_id, is_unassigned=is_unassigned)
+            self._notification_store.clear_task_key(task_key)
         
         # Check each past due task - only notify if we haven't already for this due date
         notifications_sent = False
@@ -2867,4 +2885,3 @@ class DonetickTodoListEntity(DonetickAllTasksList):
         """Initialize the Todo List."""
         super().__init__(coordinator, config_entry, hass)
         self._attr_unique_id = f"dt_{config_entry.entry_id}"
-

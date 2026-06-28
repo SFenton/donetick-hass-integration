@@ -1010,6 +1010,37 @@ class TestScheduledTransitions:
         
         assert next_transition is None
 
+    @pytest.mark.asyncio
+    async def test_past_due_notification_cleanup_handles_suffixed_store_keys(self, mock_config_entry, mock_hass):
+        """Suffixed notification keys from older stores should not break past-due setup."""
+        now = datetime.now(ZoneInfo("America/New_York"))
+        task = DonetickTask.from_json({
+            "id": 240,
+            "name": "Wash Water Bottles",
+            "frequencyType": "weekly",
+            "nextDueDate": (now - timedelta(hours=1)).isoformat(),
+            "isActive": True,
+            "assignedTo": None,
+            "priority": 2,
+        })
+        coordinator = MagicMock()
+        coordinator.data = {240: task}
+        coordinator.data_version = 1
+        coordinator.tasks_list = [task]
+        entity = DonetickDateFilteredTasksList(coordinator, mock_config_entry, mock_hass, "past_due")
+        entity._notification_manager = MagicMock()
+        entity._notification_manager.is_enabled.return_value = True
+        entity._notification_manager.send_unassigned_past_due_notification = AsyncMock(return_value=0)
+        entity._notification_store = MagicMock()
+        entity._notification_store._data = {"240:2": task.next_due_date.isoformat()}
+        entity._notification_store.was_notified.return_value = True
+        entity._notification_store.async_save = AsyncMock()
+
+        await entity._check_and_notify_past_due_tasks()
+
+        entity._notification_store.clear_task_key.assert_not_called()
+        entity._notification_manager.send_unassigned_past_due_notification.assert_not_called()
+
 
 # =============================================================================
 # Tests for Recurrence Filtering Helper Functions

@@ -692,6 +692,18 @@ class TestNotificationStoreBasic:
         assert "43" not in store._data
         assert "44" not in store._data
 
+    def test_clear_task_key_removes_suffixed_key(self, mock_hass):
+        """Test clearing an exact suffixed notification key."""
+        from custom_components.donetick.todo import NotificationStore
+
+        store = NotificationStore(mock_hass, "test_entry")
+        store._loaded = True
+        store._data = {"240:2": "2026-06-28T17:30:00+00:00"}
+
+        store.clear_task_key("240:2")
+
+        assert store._data == {}
+
 
 class TestNotificationStorePersistence:
     """Tests for NotificationStore persistence."""
