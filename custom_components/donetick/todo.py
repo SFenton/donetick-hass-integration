@@ -70,6 +70,15 @@ from .model import DonetickTask, DonetickMember
 
 _LOGGER = logging.getLogger(__name__)
 
+REACT_DASHBOARD_BASE_URL = "/sfenton-react-dash/home"
+DEFAULT_CHORES_ROUTE_PATH = "chores"
+UNASSIGNED_CHORES_ROUTE_PATH = "unassigned-chores"
+ASSIGNEE_CHORES_ROUTE_PATHS = {
+    1: "stephens-chores",
+    2: "stephs-chores",
+    3: "home-improvement-chores",
+}
+
 # Track recently completed task IDs to prevent double-completion across list entities
 # Key: task_id (int), Value: timestamp when completed
 _recently_completed_task_ids: dict[int, datetime] = {}
@@ -505,6 +514,17 @@ def _notification_task_id_from_key(task_key: Any) -> int | None:
         return None
 
 
+def _react_dashboard_chores_url(path: str) -> str:
+    """Build the React Dash wrapper URL for a chore route."""
+    return f"{REACT_DASHBOARD_BASE_URL}?path={path}"
+
+
+def _task_notification_url(task: DonetickTask) -> str:
+    """Build the notification URL for the task's assigned chore page."""
+    route_path = ASSIGNEE_CHORES_ROUTE_PATHS.get(task.assigned_to, DEFAULT_CHORES_ROUTE_PATH)
+    return _react_dashboard_chores_url(route_path)
+
+
 class NotificationManager:
     """Manages past-due notifications for tasks."""
     
@@ -574,14 +594,16 @@ class NotificationManager:
         title = f"{task.name} · Past Due"
         if is_reminder:
             title = f"Reminder: {title}"
-        
+
+        notification_url = _task_notification_url(task)
+
         # Build notification data with actionable buttons
         data = {
             "title": title,
             "message": "Your task is past due. Please complete it or edit its due date to stop receiving notifications.",
             "data": {
-                "url": "/at-a-glance/chores",
-                "clickAction": "/at-a-glance/chores",
+                "url": notification_url,
+                "clickAction": notification_url,
                 "tag": f"donetick_task_{task.id}",  # Allows replacing/dismissing notification
                 "push": {
                     "sound": "default",
@@ -648,14 +670,16 @@ class NotificationManager:
         title = f"{task.name} · Past Due"
         if is_reminder:
             title = f"Reminder: {title}"
-        
+
+        notification_url = _react_dashboard_chores_url(UNASSIGNED_CHORES_ROUTE_PATH)
+
         # Build notification data with actionable buttons
         data = {
             "title": title,
             "message": "An unassigned task is past due. Please assign it or complete it.",
             "data": {
-                "url": "/at-a-glance/chores",
-                "clickAction": "/at-a-glance/chores",
+                "url": notification_url,
+                "clickAction": notification_url,
                 "tag": f"donetick_unassigned_task_{task.id}",  # Allows replacing/dismissing notification
                 "push": {
                     "sound": "default",

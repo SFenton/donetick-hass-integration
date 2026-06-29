@@ -224,6 +224,8 @@ class TestNotificationManagerSendNotification:
         data = call_args[0][2]
         assert "Critical Task" in data["title"]
         assert "Past Due" in data["title"]
+        assert data["data"]["url"] == "/sfenton-react-dash/home?path=stephens-chores"
+        assert data["data"]["clickAction"] == "/sfenton-react-dash/home?path=stephens-chores"
         assert data["data"]["push"]["interruption-level"] == "critical"
         assert "actions" in data["data"]
         assert len(data["data"]["actions"]) == 3
@@ -296,6 +298,24 @@ class TestNotificationManagerSendNotification:
         call_args = mock_hass.services.async_call.call_args
         data = call_args[0][2]
         assert data["data"]["push"]["interruption-level"] == "time-sensitive"
+        assert data["data"]["url"] == "/sfenton-react-dash/home?path=stephs-chores"
+        assert data["data"]["clickAction"] == "/sfenton-react-dash/home?path=stephs-chores"
+
+    @pytest.mark.asyncio
+    async def test_send_notification_home_improvement_route(
+        self, mock_hass, mock_config_entry, sample_task_p1
+    ):
+        """Test home improvement assignee notifications open the home chore route."""
+        mock_config_entry.data[CONF_ASSIGNEE_NOTIFICATIONS]["3"] = "notify.mobile_app_home"
+        sample_task_p1.assigned_to = 3
+        manager = NotificationManager(mock_hass, mock_config_entry)
+        
+        await manager.send_past_due_notification(sample_task_p1)
+        
+        call_args = mock_hass.services.async_call.call_args
+        data = call_args[0][2]
+        assert data["data"]["url"] == "/sfenton-react-dash/home?path=home-improvement-chores"
+        assert data["data"]["clickAction"] == "/sfenton-react-dash/home?path=home-improvement-chores"
 
     @pytest.mark.asyncio
     async def test_send_notification_p3_passive(self, mock_hass, mock_config_entry, sample_task_p3):
@@ -317,6 +337,21 @@ class TestNotificationManagerSendNotification:
         result = await manager.send_past_due_notification(sample_task_p1)
         
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_send_unassigned_notification_uses_unassigned_route(
+        self, mock_hass, mock_config_entry, sample_task_no_assignee
+    ):
+        """Test unassigned task notifications open the unassigned chore route."""
+        manager = NotificationManager(mock_hass, mock_config_entry)
+        
+        result = await manager.send_unassigned_past_due_notification(sample_task_no_assignee)
+        
+        assert result == 2
+        assert mock_hass.services.async_call.call_count == 2
+        data = mock_hass.services.async_call.call_args_list[0][0][2]
+        assert data["data"]["url"] == "/sfenton-react-dash/home?path=unassigned-chores"
+        assert data["data"]["clickAction"] == "/sfenton-react-dash/home?path=unassigned-chores"
 
 
 class TestNotificationManagerReminders:
