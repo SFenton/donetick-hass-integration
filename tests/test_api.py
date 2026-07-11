@@ -630,6 +630,7 @@ class TestDonetickApiClientTaskOperations:
         assert payload["id"] == existing_task.id
         assert payload["name"] == existing_task.name
         assert payload["frequencyType"] == existing_task.frequency_type
+        assert payload["frequencyMetadata"] == existing_task.frequency_metadata
         assert payload["assignStrategy"] == existing_task.assign_strategy
         assert payload["assignees"] == [{"userId": 42}, {"userId": 43}]
         assert payload["notification"] is False

@@ -378,6 +378,8 @@ class DonetickApiClient:
             payload["description"] = task.description
         if task.next_due_date is not None:
             payload["nextDueDate"] = task.next_due_date.isoformat()
+        if task.frequency_metadata is not None:
+            payload["frequencyMetadata"] = task.frequency_metadata
         if task.assigned_to is not None:
             payload["assignedTo"] = task.assigned_to
         if task.assign_strategy:
