@@ -373,25 +373,24 @@ class DonetickApiClient:
             "frequencyType": task.frequency_type or FREQUENCY_ONCE,
             "frequency": task.frequency,
             "assignees": [{"userId": assignee.user_id} for assignee in (task.assignees or [])],
+            "description": task.description if task.description is not None else "",
+            "labelsV2": [{"id": label.id} for label in (task.labels_v2 or [])],
         }
-        if task.description is not None:
-            payload["description"] = task.description
         if task.next_due_date is not None:
             payload["nextDueDate"] = task.next_due_date.isoformat()
         if task.frequency_metadata is not None:
             payload["frequencyMetadata"] = task.frequency_metadata
         if task.assigned_to is not None:
             payload["assignedTo"] = task.assigned_to
-        if task.assign_strategy:
-            payload["assignStrategy"] = task.assign_strategy
-        elif not task.assignees:
-            payload["assignStrategy"] = "no_assignee"
+        payload["assignStrategy"] = (
+            task.assign_strategy
+            if task.assign_strategy
+            else ("no_assignee" if not task.assignees else ASSIGN_RANDOM)
+        )
         if task.priority is not None:
             payload["priority"] = task.priority
         if task.points is not None:
             payload["points"] = task.points
-        if task.labels_v2 is not None:
-            payload["labelsV2"] = [{"id": label.id} for label in task.labels_v2]
         payload["notification"] = task.notification
         payload["notificationMetadata"] = task.notification_metadata or {}
         payload["isRolling"] = task.is_rolling

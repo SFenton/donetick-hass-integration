@@ -15,7 +15,12 @@ from custom_components.donetick.api import (
     TaskNotificationUpdateError,
 )
 from custom_components.donetick.const import AUTH_TYPE_JWT, AUTH_TYPE_API_KEY
-from custom_components.donetick.model import DonetickTask, DonetickThing, DonetickMember
+from custom_components.donetick.model import (
+    DonetickAssignee,
+    DonetickMember,
+    DonetickTask,
+    DonetickThing,
+)
 
 
 class TestDonetickApiClientInit:
@@ -635,6 +640,33 @@ class TestDonetickApiClientTaskOperations:
         assert payload["assignees"] == [{"userId": 42}, {"userId": 43}]
         assert payload["notification"] is False
         assert payload["notificationMetadata"] == existing_task.notification_metadata
+
+    def test_task_update_payload_fills_server_required_fields(
+        self,
+        authenticated_client,
+    ):
+        """Full task updates should never omit fields dereferenced by Donetick."""
+        task = DonetickTask(
+            id=10,
+            name="Label-free task",
+            next_due_date=None,
+            status=0,
+            priority=1,
+            labels=None,
+            is_active=True,
+            frequency_type="daily",
+            frequency=1,
+            description=None,
+            assign_strategy=None,
+            assignees=[DonetickAssignee(user_id=42)],
+            labels_v2=None,
+        )
+
+        payload = authenticated_client._task_update_payload(task)
+
+        assert payload["description"] == ""
+        assert payload["labelsV2"] == []
+        assert payload["assignStrategy"] == "random"
 
 
 class TestDonetickApiClientThingOperations:

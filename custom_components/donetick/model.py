@@ -149,7 +149,7 @@ class DonetickTask:
         
         # Parse labels v2
         labels_v2 = None
-        if data.get("labelsV2"):
+        if data.get("labelsV2") is not None:
             labels_v2 = [
                 DonetickLabel(
                     id=l.get("id", 0),

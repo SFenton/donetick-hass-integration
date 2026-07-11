@@ -208,6 +208,18 @@ class TestDonetickTask:
         
         assert task.labels_v2 is None
 
+    def test_from_json_empty_labels_v2(self):
+        """Test parsing preserves an explicitly empty labelsV2 array."""
+        json_data = {
+            "id": 9,
+            "name": "Task with no labels",
+            "labelsV2": [],
+        }
+
+        task = DonetickTask.from_json(json_data)
+
+        assert task.labels_v2 == []
+
     def test_from_json_inactive_task(self):
         """Test parsing inactive chore."""
         json_data = {
