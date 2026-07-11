@@ -7,6 +7,7 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import (
@@ -664,10 +665,27 @@ async def async_set_task_notifications_service(hass: HomeAssistant, call: Servic
 
     try:
         await client.async_set_task_notifications(task_ids=task_ids, notification=notification)
-        _LOGGER.info("Set notifications=%s for Donetick tasks %s", notification, task_ids)
-        await _refresh_todo_entities(hass, entry.entry_id)
     except Exception as e:
         _LOGGER.error("Failed to set notifications=%s for Donetick tasks %s: %s", notification, task_ids, e)
+        try:
+            await _refresh_todo_entities(hass, entry.entry_id)
+        except Exception as refresh_error:
+            _LOGGER.warning(
+                "Failed to refresh Donetick entities after notification update error: %s",
+                refresh_error,
+            )
+        raise HomeAssistantError(
+            f"Failed to set notification={notification} for Donetick tasks {task_ids}"
+        ) from e
+
+    _LOGGER.info("Set notifications=%s for Donetick tasks %s", notification, task_ids)
+    try:
+        await _refresh_todo_entities(hass, entry.entry_id)
+    except Exception as refresh_error:
+        _LOGGER.warning(
+            "Notification state was verified, but Donetick entity refresh failed: %s",
+            refresh_error,
+        )
 
 async def async_delete_task_service(hass: HomeAssistant, call: ServiceCall) -> None:
     """Handle the delete_task service call."""

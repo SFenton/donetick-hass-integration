@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 import json
 import asyncio
-from typing import List, Optional, Any, Dict
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -15,6 +15,8 @@ from .const import (
     JWT_REFRESH_BUFFER,
     FREQUENCY_ONCE,
     ASSIGN_RANDOM,
+    TASK_NOTIFICATION_RETRY_DELAYS,
+    TASK_NOTIFICATION_TRANSIENT_STATUSES,
 )
 from .model import DonetickTask, DonetickThing, DonetickMember
 
@@ -24,6 +26,46 @@ _LOGGER = logging.getLogger(__name__)
 class AuthenticationError(Exception):
     """Exception raised for authentication failures."""
     pass
+
+
+class TaskNotificationUpdateError(Exception):
+    """Exception raised when task notification state cannot be reconciled."""
+
+    def __init__(
+        self,
+        notification: bool,
+        missing_task_ids: List[int],
+        mismatched_task_ids: List[int],
+        task_errors: Dict[int, Exception],
+    ) -> None:
+        """Initialize the reconciliation error."""
+        self.notification = notification
+        self.missing_task_ids = missing_task_ids
+        self.mismatched_task_ids = mismatched_task_ids
+        self.task_errors = task_errors
+
+        details = []
+        if missing_task_ids:
+            details.append(f"missing task IDs {missing_task_ids}")
+        if mismatched_task_ids:
+            details.append(f"mismatched task IDs {mismatched_task_ids}")
+        if task_errors:
+            errors = {
+                task_id: str(error)
+                for task_id, error in task_errors.items()
+                if task_id in mismatched_task_ids
+            }
+            if errors:
+                details.append(f"last errors {errors}")
+
+        detail = "; ".join(details) or "unknown reconciliation failure"
+        super().__init__(
+            f"Could not set notification={notification} for Donetick tasks: {detail}"
+        )
+
+
+class TaskNotificationTaskListError(Exception):
+    """Exception raised when reconciliation cannot load any Donetick tasks."""
 
 
 class DonetickApiClient:
@@ -727,14 +769,130 @@ class DonetickApiClient:
         task_ids: List[int],
         notification: bool,
     ) -> List[DonetickTask]:
-        """Enable or disable notifications for multiple tasks."""
+        """Reconcile notification state for multiple tasks."""
         if not self.is_jwt_auth:
             raise NotImplementedError("Task notification updates are only available with JWT authentication")
 
-        updated_tasks: List[DonetickTask] = []
-        for task_id in task_ids:
-            updated_tasks.append(await self.async_update_task(task_id=task_id, notification=notification))
-        return updated_tasks
+        requested_task_ids = list(dict.fromkeys(task_ids))
+        current_tasks = await self._async_retry_task_notification_operation(
+            self._async_get_tasks_for_notification_reconciliation,
+            "load Donetick tasks before notification reconciliation",
+        )
+        current_tasks_by_id = {task.id: task for task in current_tasks}
+        task_errors: Dict[int, Exception] = {}
+        writes_attempted = False
+
+        for task_id in requested_task_ids:
+            task = current_tasks_by_id.get(task_id)
+            if task is None or task.notification == notification:
+                continue
+
+            writes_attempted = True
+            try:
+                await self._async_retry_task_notification_operation(
+                    lambda task=task: self._async_write_task_notification(
+                        task,
+                        notification,
+                    ),
+                    f"set notification={notification} for Donetick task {task_id}",
+                )
+            except Exception as err:
+                task_errors[task_id] = err
+
+        if writes_attempted:
+            verified_tasks = await self._async_retry_task_notification_operation(
+                self._async_get_tasks_for_notification_reconciliation,
+                "verify Donetick task notification reconciliation",
+            )
+            verified_tasks_by_id = {task.id: task for task in verified_tasks}
+        else:
+            verified_tasks_by_id = current_tasks_by_id
+
+        missing_task_ids = [
+            task_id
+            for task_id in requested_task_ids
+            if task_id not in verified_tasks_by_id
+        ]
+        mismatched_task_ids = [
+            task_id
+            for task_id in requested_task_ids
+            if task_id in verified_tasks_by_id
+            and verified_tasks_by_id[task_id].notification != notification
+        ]
+
+        if missing_task_ids or mismatched_task_ids:
+            raise TaskNotificationUpdateError(
+                notification=notification,
+                missing_task_ids=missing_task_ids,
+                mismatched_task_ids=mismatched_task_ids,
+                task_errors=task_errors,
+            )
+
+        return [verified_tasks_by_id[task_id] for task_id in requested_task_ids]
+
+    async def _async_get_tasks_for_notification_reconciliation(
+        self,
+    ) -> List[DonetickTask]:
+        """Load tasks and surface an empty result as a retryable anomaly."""
+        tasks = await self.async_get_tasks()
+        if not tasks:
+            raise TaskNotificationTaskListError(
+                "Donetick returned no tasks during notification reconciliation"
+            )
+        return tasks
+
+    async def _async_write_task_notification(
+        self,
+        task: DonetickTask,
+        notification: bool,
+    ) -> None:
+        """Write one task's notification state with a full Donetick payload."""
+        payload = self._task_update_payload(task)
+        payload["notification"] = notification
+        await self._request("PUT", "/api/v1/chores/", json_data=payload)
+
+    async def _async_retry_task_notification_operation(
+        self,
+        operation: Callable[[], Awaitable[Any]],
+        description: str,
+    ) -> Any:
+        """Retry a serialized notification operation on transient failures."""
+        for attempt in range(len(TASK_NOTIFICATION_RETRY_DELAYS) + 1):
+            try:
+                return await operation()
+            except Exception as err:
+                if (
+                    attempt >= len(TASK_NOTIFICATION_RETRY_DELAYS)
+                    or not self._is_transient_task_notification_error(err)
+                ):
+                    raise
+
+                delay = TASK_NOTIFICATION_RETRY_DELAYS[attempt]
+                _LOGGER.warning(
+                    "%s failed transiently on attempt %d/%d: %s; retrying in %ss",
+                    description,
+                    attempt + 1,
+                    len(TASK_NOTIFICATION_RETRY_DELAYS) + 1,
+                    err,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        raise RuntimeError(f"Retry loop ended unexpectedly while trying to {description}")
+
+    @staticmethod
+    def _is_transient_task_notification_error(error: Exception) -> bool:
+        """Return whether a task notification failure is safe to retry."""
+        if isinstance(error, aiohttp.ClientResponseError):
+            return error.status in TASK_NOTIFICATION_TRANSIENT_STATUSES
+        return isinstance(
+            error,
+            (
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                TaskNotificationTaskListError,
+            ),
+        )
 
     async def async_delete_task(self, task_id: int) -> bool:
         """Delete a task."""

@@ -8,7 +8,12 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from custom_components.donetick.api import DonetickApiClient, AuthenticationError
+from custom_components.donetick.api import (
+    AuthenticationError,
+    DonetickApiClient,
+    TaskNotificationTaskListError,
+    TaskNotificationUpdateError,
+)
 from custom_components.donetick.const import AUTH_TYPE_JWT, AUTH_TYPE_API_KEY
 from custom_components.donetick.model import DonetickTask, DonetickThing, DonetickMember
 
@@ -474,17 +479,126 @@ class TestDonetickApiClientTaskOperations:
     @pytest.mark.asyncio
     async def test_set_task_notifications_updates_each_task(self, authenticated_client, sample_chore_json):
         """Test bulk notification updates."""
-        updated_task = DonetickTask.from_json(sample_chore_json)
-        authenticated_client.async_update_task = AsyncMock(return_value=updated_task)
+        tasks_before = []
+        tasks_after = []
+        for task_id in (1, 2, 3):
+            task_json = {**sample_chore_json, "id": task_id, "notification": True}
+            tasks_before.append(DonetickTask.from_json(task_json))
+            tasks_after.append(
+                DonetickTask.from_json({**task_json, "notification": False})
+            )
+        authenticated_client.async_get_tasks = AsyncMock(
+            side_effect=[tasks_before, tasks_after]
+        )
+        authenticated_client._request = AsyncMock(return_value={})
 
         result = await authenticated_client.async_set_task_notifications([1, 2, 3], False)
 
-        assert result == [updated_task, updated_task, updated_task]
-        assert authenticated_client.async_update_task.call_args_list == [
-            call(task_id=1, notification=False),
-            call(task_id=2, notification=False),
-            call(task_id=3, notification=False),
-        ]
+        assert result == tasks_after
+        assert authenticated_client._request.call_count == 3
+        assert [
+            request.kwargs["json_data"]["id"]
+            for request in authenticated_client._request.call_args_list
+        ] == [1, 2, 3]
+        assert all(
+            request.kwargs["json_data"]["notification"] is False
+            for request in authenticated_client._request.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_task_notifications_skips_matching_tasks(
+        self,
+        authenticated_client,
+        sample_chore_json,
+    ):
+        """Test reconciliation does not write tasks already in the desired state."""
+        task = DonetickTask.from_json(
+            {**sample_chore_json, "notification": False}
+        )
+        authenticated_client.async_get_tasks = AsyncMock(return_value=[task])
+        authenticated_client._request = AsyncMock()
+
+        result = await authenticated_client.async_set_task_notifications([task.id], False)
+
+        assert result == [task]
+        authenticated_client._request.assert_not_called()
+        authenticated_client.async_get_tasks.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_set_task_notifications_retries_transient_failure(
+        self,
+        authenticated_client,
+        sample_chore_json,
+    ):
+        """Test transient task update failures are retried and verified."""
+        task_before = DonetickTask.from_json(
+            {**sample_chore_json, "notification": True}
+        )
+        task_after = DonetickTask.from_json(
+            {**sample_chore_json, "notification": False}
+        )
+        request_info = MagicMock()
+        request_info.real_url = "https://donetick.example.com/api/v1/chores/"
+        transient_error = aiohttp.ClientResponseError(
+            request_info,
+            (),
+            status=502,
+            message="Bad Gateway",
+        )
+        authenticated_client.async_get_tasks = AsyncMock(
+            side_effect=[[task_before], [task_after]]
+        )
+        authenticated_client._request = AsyncMock(
+            side_effect=[transient_error, {}]
+        )
+
+        with patch("custom_components.donetick.api.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await authenticated_client.async_set_task_notifications(
+                [task_before.id],
+                False,
+            )
+
+        assert result == [task_after]
+        assert authenticated_client._request.await_count == 2
+        sleep.assert_awaited_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_set_task_notifications_raises_when_verification_mismatches(
+        self,
+        authenticated_client,
+        sample_chore_json,
+    ):
+        """Test reconciliation fails when Donetick does not persist the desired state."""
+        task = DonetickTask.from_json(
+            {**sample_chore_json, "notification": True}
+        )
+        authenticated_client.async_get_tasks = AsyncMock(
+            side_effect=[[task], [task]]
+        )
+        authenticated_client._request = AsyncMock(return_value={})
+
+        with pytest.raises(TaskNotificationUpdateError) as error:
+            await authenticated_client.async_set_task_notifications(
+                [task.id],
+                False,
+            )
+
+        assert error.value.mismatched_task_ids == [task.id]
+
+    @pytest.mark.asyncio
+    async def test_set_task_notifications_retries_empty_task_list(
+        self,
+        authenticated_client,
+    ):
+        """Test a silently empty task fetch is retried during reconciliation."""
+        authenticated_client.async_get_tasks = AsyncMock(return_value=[])
+
+        with patch("custom_components.donetick.api.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            with pytest.raises(TaskNotificationTaskListError):
+                await authenticated_client.async_set_task_notifications([1], False)
+
+        assert authenticated_client.async_get_tasks.await_count == 4
+        assert sleep.await_args_list == [call(1), call(2), call(4)]
 
     @pytest.mark.asyncio
     async def test_set_task_notifications_requires_jwt(self, mock_aiohttp_session):

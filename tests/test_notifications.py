@@ -6,7 +6,11 @@ from zoneinfo import ZoneInfo
 
 from homeassistant.core import HomeAssistant
 
-from custom_components.donetick.todo import NotificationManager, _notification_reminders
+from custom_components.donetick.todo import (
+    DonetickDateFilteredTasksList,
+    NotificationManager,
+    _notification_reminders,
+)
 from custom_components.donetick.const import (
     DOMAIN,
     CONF_NOTIFY_ON_PAST_DUE,
@@ -17,7 +21,7 @@ from custom_components.donetick.const import (
     PRIORITY_P4,
     NOTIFICATION_REMINDER_INTERVAL,
 )
-from custom_components.donetick.model import DonetickTask
+from custom_components.donetick.model import DonetickMember, DonetickTask
 
 
 # ==================== Fixtures ====================
@@ -76,6 +80,7 @@ def sample_task_p1():
         priority=PRIORITY_P1,
         status=0,
         labels=None,
+        notification=True,
     )
 
 
@@ -94,6 +99,7 @@ def sample_task_p2():
         priority=PRIORITY_P2,
         status=0,
         labels=None,
+        notification=True,
     )
 
 
@@ -112,6 +118,7 @@ def sample_task_p3():
         priority=PRIORITY_P3,
         status=0,
         labels=None,
+        notification=True,
     )
 
 
@@ -130,6 +137,7 @@ def sample_task_no_assignee():
         priority=PRIORITY_P3,
         status=0,
         labels=None,
+        notification=True,
     )
 
 
@@ -249,6 +257,22 @@ class TestNotificationManagerSendNotification:
         
         result = await manager.send_past_due_notification(sample_task_p1)
         
+        assert result is False
+        mock_hass.services.async_call.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_notification_disabled_for_task(
+        self,
+        mock_hass,
+        mock_config_entry,
+        sample_task_p1,
+    ):
+        """Test notification not sent when the task notification setting is off."""
+        sample_task_p1.notification = False
+        manager = NotificationManager(mock_hass, mock_config_entry)
+
+        result = await manager.send_past_due_notification(sample_task_p1)
+
         assert result is False
         mock_hass.services.async_call.assert_not_called()
 
@@ -385,6 +409,111 @@ class TestNotificationManagerReminders:
         result = manager.schedule_reminder(sample_task_p1, datetime.now())
         
         assert result is None
+
+    def test_schedule_reminder_disabled_for_task(
+        self,
+        mock_hass,
+        mock_config_entry,
+        sample_task_p1,
+    ):
+        """Test scheduling stops when the task notification setting is off."""
+        sample_task_p1.notification = False
+        manager = NotificationManager(mock_hass, mock_config_entry)
+
+        result = manager.schedule_reminder(sample_task_p1, datetime.now())
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_existing_reminder_stops_after_task_notifications_disabled(
+        self,
+        mock_hass,
+        mock_config_entry,
+        sample_task_p1,
+    ):
+        """Test a previously scheduled reminder does not reschedule after suppression."""
+        callbacks = []
+
+        def capture_callback(hass, callback, reminder_time):
+            callbacks.append(callback)
+            return MagicMock()
+
+        manager = NotificationManager(mock_hass, mock_config_entry)
+        coordinator = MagicMock()
+        coordinator.data = {sample_task_p1.id: sample_task_p1}
+        mock_hass.data[DOMAIN][mock_config_entry.entry_id] = {
+            "coordinator": coordinator,
+        }
+
+        with patch(
+            "custom_components.donetick.todo.async_track_point_in_time",
+            side_effect=capture_callback,
+        ):
+            manager.schedule_reminder(sample_task_p1, datetime.now())
+            sample_task_p1.notification = False
+            await callbacks[0](datetime.now())
+
+        mock_hass.services.async_call.assert_not_called()
+        assert sample_task_p1.id not in _notification_reminders
+
+
+class TestPastDueNotificationSuppression:
+    """Tests for suppressing individual past-due task notifications."""
+
+    @pytest.mark.asyncio
+    async def test_suppressed_task_is_recorded_without_notification(
+        self,
+        mock_hass,
+        mock_config_entry,
+        sample_task_p1,
+    ):
+        """Test a suppressed occurrence is not replayed after notifications return."""
+        sample_task_p1.notification = False
+        member = DonetickMember(
+            id=1,
+            user_id=sample_task_p1.assigned_to,
+            circle_id=1,
+            role="member",
+            is_active=True,
+            username="user1",
+            display_name="User One",
+        )
+        coordinator = MagicMock()
+        coordinator.tasks_list = [sample_task_p1]
+        coordinator.data = {sample_task_p1.id: sample_task_p1}
+        coordinator.data_version = 1
+        entity = DonetickDateFilteredTasksList(
+            coordinator,
+            mock_config_entry,
+            mock_hass,
+            "past_due",
+            member,
+        )
+        entity._notification_manager = NotificationManager(
+            mock_hass,
+            mock_config_entry,
+        )
+        notification_store = MagicMock()
+        notification_store._data = {}
+        notification_store.was_notified.return_value = False
+        notification_store.async_save = AsyncMock()
+        entity._notification_store = notification_store
+
+        with patch(
+            "custom_components.donetick.todo.NotificationManager.cancel_reminder"
+        ) as cancel_reminder:
+            await entity._check_and_notify_past_due_tasks()
+
+        cancel_reminder.assert_called_once_with(
+            sample_task_p1.id,
+            is_unassigned=False,
+        )
+        notification_store.mark_notified.assert_called_once_with(
+            sample_task_p1.id,
+            sample_task_p1.next_due_date,
+        )
+        notification_store.async_save.assert_awaited_once()
+        mock_hass.services.async_call.assert_not_called()
 
 
 # ==================== Notification Action Handler Tests ====================

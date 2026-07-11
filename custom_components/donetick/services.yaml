@@ -265,7 +265,7 @@ update_task:
 
 set_task_notifications:
   name: Set Task Notifications
-  description: Enable or disable notifications for multiple Donetick tasks. Requires username/password authentication.
+  description: Reconcile notifications for multiple Donetick tasks with transient retries and final verification. Requires username/password authentication.
   fields:
     task_ids:
       name: Task IDs

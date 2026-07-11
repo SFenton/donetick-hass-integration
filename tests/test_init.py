@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import voluptuous as vol
 from datetime import datetime
 import zoneinfo
+from homeassistant.exceptions import HomeAssistantError
 
 import sys
 from pathlib import Path
@@ -756,6 +757,62 @@ class TestSetTaskNotificationsService:
                     notification=False,
                 )
                 mock_refresh.assert_called_once_with(mock_hass, "test_entry_id")
+
+    @pytest.mark.asyncio
+    async def test_set_task_notifications_surfaces_failure(self, mock_hass):
+        """Test bulk task notification failures fail the Home Assistant service."""
+        call = MagicMock()
+        call.data = {
+            "task_ids": [1, 2],
+            "notification": False,
+        }
+
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_client.async_set_task_notifications.side_effect = RuntimeError(
+                    "Donetick unavailable"
+                )
+                mock_get_client.return_value = mock_client
+
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock) as mock_refresh:
+                    with pytest.raises(HomeAssistantError):
+                        await async_set_task_notifications_service(mock_hass, call)
+
+                mock_refresh.assert_awaited_once_with(mock_hass, "test_entry_id")
+
+    @pytest.mark.asyncio
+    async def test_set_task_notifications_keeps_verified_success_on_refresh_failure(
+        self,
+        mock_hass,
+    ):
+        """Test a local refresh failure does not hide a verified server update."""
+        call = MagicMock()
+        call.data = {
+            "task_ids": [1, 2],
+            "notification": False,
+        }
+
+        with patch('custom_components.donetick._get_config_entry', new_callable=AsyncMock) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+
+            with patch('custom_components.donetick._get_api_client') as mock_get_client:
+                mock_client = AsyncMock()
+                mock_client.async_set_task_notifications.return_value = []
+                mock_get_client.return_value = mock_client
+
+                with patch('custom_components.donetick._refresh_todo_entities', new_callable=AsyncMock) as mock_refresh:
+                    mock_refresh.side_effect = RuntimeError("Refresh failed")
+
+                    await async_set_task_notifications_service(mock_hass, call)
+
+                mock_refresh.assert_awaited_once_with(mock_hass, "test_entry_id")
 
 
 class TestNormalizeDatetimeString:

@@ -27,6 +27,10 @@ JWT_REFRESH_BUFFER = 300  # seconds - refresh token 5 minutes before expiry
 
 API_TIMEOUT = 10  # seconds
 
+# Task notification updates are serialized and retry only transient failures.
+TASK_NOTIFICATION_RETRY_DELAYS = (1, 2, 4)
+TASK_NOTIFICATION_TRANSIENT_STATUSES = (429, 500, 502, 503, 504)
+
 # Frequency types for task creation
 FREQUENCY_ONCE = "once"
 FREQUENCY_DAILY = "daily"

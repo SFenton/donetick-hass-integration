@@ -536,6 +536,10 @@ class NotificationManager:
     def is_enabled(self) -> bool:
         """Check if notifications are enabled."""
         return self._config_entry.data.get(CONF_NOTIFY_ON_PAST_DUE, False)
+
+    def is_task_enabled(self, task: DonetickTask) -> bool:
+        """Check if past-due notifications are enabled for this task."""
+        return self.is_enabled() and task.notification
     
     def get_notify_service(self, assignee_id: int | None) -> str | None:
         """Get the notification service for a given assignee."""
@@ -572,7 +576,7 @@ class NotificationManager:
         
         Returns True if notification was sent successfully.
         """
-        if not self.is_enabled():
+        if not self.is_task_enabled(task):
             return False
         
         notify_service = self.get_notify_service(task.assigned_to)
@@ -655,7 +659,7 @@ class NotificationManager:
         
         Returns the number of notifications sent successfully.
         """
-        if not self.is_enabled():
+        if not self.is_task_enabled(task):
             return 0
         
         all_services = self.get_all_notify_services()
@@ -741,7 +745,7 @@ class NotificationManager:
         """
         global _notification_reminders
         
-        if not self.is_enabled():
+        if not self.is_task_enabled(task):
             return None
         
         # Check if reminder already scheduled
@@ -772,11 +776,10 @@ class NotificationManager:
                 current_task = coordinator.data.get(task.id)
                 if current_task and current_task.is_active:
                     # Task still exists and is active - send reminder
-                    await self.send_past_due_notification(current_task, is_reminder=True)
-                    
-                    # Schedule next reminder
-                    next_reminder = now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
-                    self.schedule_reminder(current_task, next_reminder)
+                    sent = await self.send_past_due_notification(current_task, is_reminder=True)
+                    if sent:
+                        next_reminder = now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
+                        self.schedule_reminder(current_task, next_reminder)
                 else:
                     _LOGGER.debug("Task %d no longer active, skipping reminder", task.id)
         
@@ -806,7 +809,7 @@ class NotificationManager:
         """
         global _notification_reminders
         
-        if not self.is_enabled():
+        if not self.is_task_enabled(task):
             return None
         
         # Use a distinct key for unassigned task reminders
@@ -836,10 +839,13 @@ class NotificationManager:
                 current_task = coordinator.data.get(task.id)
                 # Check if task is still unassigned, active, and exists
                 if current_task and current_task.is_active and current_task.assigned_to is None:
-                    await self.send_unassigned_past_due_notification(current_task, is_reminder=True)
-                    
-                    next_reminder = now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
-                    self.schedule_unassigned_reminder(current_task, next_reminder)
+                    sent_count = await self.send_unassigned_past_due_notification(
+                        current_task,
+                        is_reminder=True,
+                    )
+                    if sent_count > 0:
+                        next_reminder = now + timedelta(seconds=NOTIFICATION_REMINDER_INTERVAL)
+                        self.schedule_unassigned_reminder(current_task, next_reminder)
                 else:
                     _LOGGER.debug("Task %d no longer unassigned or active, skipping reminder", task.id)
         
@@ -1734,8 +1740,18 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
             self._notification_store.clear_task_key(task_key)
         
         # Check each past due task - only notify if we haven't already for this due date
-        notifications_sent = False
+        notification_store_changed = bool(stale_task_keys)
         for task in filtered_tasks:
+            if not task.notification:
+                NotificationManager.cancel_reminder(
+                    task.id,
+                    is_unassigned=is_unassigned,
+                )
+                if not self._notification_store.was_notified(task.id, task.next_due_date):
+                    self._notification_store.mark_notified(task.id, task.next_due_date)
+                    notification_store_changed = True
+                continue
+
             # Check if we already notified for this specific task+due_date combo
             if self._notification_store.was_notified(task.id, task.next_due_date):
                 continue
@@ -1751,7 +1767,7 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
                     self._notification_manager.schedule_unassigned_reminder(task, reminder_time)
                     # Mark as notified with current due date
                     self._notification_store.mark_notified(task.id, task.next_due_date)
-                    notifications_sent = True
+                    notification_store_changed = True
             else:
                 # For assigned tasks, notify the specific assignee
                 sent = await self._notification_manager.send_past_due_notification(task)
@@ -1762,10 +1778,10 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
                     self._notification_manager.schedule_reminder(task, reminder_time)
                     # Mark as notified with current due date
                     self._notification_store.mark_notified(task.id, task.next_due_date)
-                    notifications_sent = True
+                    notification_store_changed = True
         
         # Persist changes if any notifications were sent or tasks were pruned
-        if notifications_sent or stale_task_keys:
+        if notification_store_changed:
             await self._notification_store.async_save()
 
     def _schedule_next_transition(self) -> None:
