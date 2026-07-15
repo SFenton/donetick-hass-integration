@@ -12,6 +12,7 @@ from custom_components.donetick.todo import (
     DonetickTaskCoordinator,
     DonetickTodoListBase,
     DonetickAllTasksList,
+    DonetickInternalAllTasksList,
     DonetickAssigneeTasksList,
     DonetickDateFilteredTasksList,
     DonetickDateFilteredWithUnassignedList,
@@ -23,6 +24,7 @@ from custom_components.donetick.todo import (
     DonetickUpcomingTodayByTimeAndFutureWithUnassignedList,
     _is_frequent_recurrence,
     _get_recurrence_advance_days,
+    async_setup_entry as async_setup_todo_entry,
 )
 from custom_components.donetick.model import DonetickTask, DonetickMember
 from custom_components.donetick.const import (
@@ -32,6 +34,7 @@ from custom_components.donetick.const import (
     AUTH_TYPE_JWT,
     CONF_SHOW_DUE_IN,
     CONF_REFRESH_INTERVAL,
+    CONF_CREATE_UNIFIED_LIST,
     CONF_MORNING_CUTOFF,
     CONF_AFTERNOON_CUTOFF,
     DEFAULT_MORNING_CUTOFF,
@@ -329,6 +332,178 @@ class TestDonetickAllTasksList:
         entity = DonetickAllTasksList(mock_coordinator, mock_config_entry, mock_hass)
         
         assert entity.name == "All Tasks"
+
+
+class TestDonetickInternalAllTasksList:
+    """Tests for the automation-safe internal All Tasks entity."""
+
+    @pytest.fixture
+    def mock_hass(self):
+        """Create a mock Home Assistant instance."""
+        hass = MagicMock()
+        hass.config.time_zone = "America/New_York"
+        hass.data = {DOMAIN: {"test_entry_id": {}}}
+        return hass
+
+    @pytest.fixture
+    def mock_config_entry(self):
+        """Create a mock config entry."""
+        entry = MagicMock()
+        entry.entry_id = "test_entry_id"
+        entry.data = {CONF_URL: "https://donetick.example.com"}
+        entry.options = {}
+        return entry
+
+    def test_entity_metadata(
+        self,
+        mock_hass,
+        mock_config_entry,
+    ):
+        """Internal entity has stable, enabled, hidden-by-default metadata."""
+        coordinator = MagicMock()
+        coordinator.data = {}
+        coordinator.data_version = 1
+        coordinator.tasks_list = []
+        entity = DonetickInternalAllTasksList(
+            coordinator,
+            mock_config_entry,
+            mock_hass,
+        )
+
+        assert entity.name == "All Tasks Internal"
+        assert entity.unique_id == "dt_test_entry_id_all_tasks_internal"
+        assert entity.suggested_object_id == "all_tasks_internal"
+        assert entity.entity_registry_enabled_default is True
+        assert entity.entity_registry_visible_default is False
+
+    @pytest.mark.asyncio
+    async def test_full_read_and_write_behavior_during_vacation(
+        self,
+        mock_hass,
+        mock_config_entry,
+    ):
+        """Internal entity reads and mutates hidden tasks like All Tasks."""
+        task = DonetickTask.from_json(
+            {
+                "id": 98765,
+                "name": "Automation task",
+                "description": "Original",
+                "isActive": True,
+                "hideOnVacation": True,
+                "frequencyType": "once",
+            }
+        )
+        coordinator = MagicMock()
+        coordinator.data = {task.id: task}
+        coordinator.data_version = 1
+        coordinator.cache_version = (1, 1)
+        coordinator.vacation_active = True
+        coordinator.tasks_list = [task]
+        coordinator.async_refresh = AsyncMock()
+        entity = DonetickInternalAllTasksList(
+            coordinator,
+            mock_config_entry,
+            mock_hass,
+        )
+        client = AsyncMock()
+        client.async_create_task.return_value = MagicMock(id=123)
+        client.async_complete_task.return_value = task
+        client.async_delete_task.return_value = True
+
+        items = entity.todo_items
+        assert [item.summary for item in items] == ["Automation task"]
+        assert entity.state == 1
+        uid = items[0].uid
+
+        with patch(
+            "custom_components.donetick.todo._create_api_client",
+            return_value=client,
+        ):
+            await entity.async_update_todo_item(
+                TodoItem(
+                    summary="Rescheduled task",
+                    uid=uid,
+                    status=TodoItemStatus.NEEDS_ACTION,
+                    description="Updated",
+                )
+            )
+            await entity.async_update_todo_item(
+                TodoItem(
+                    summary="Automation task",
+                    uid=uid,
+                    status=TodoItemStatus.COMPLETED,
+                    description="Original",
+                )
+            )
+            await entity.async_create_todo_item(
+                TodoItem(
+                    summary="Created internally",
+                    status=TodoItemStatus.NEEDS_ACTION,
+                    description="Created",
+                )
+            )
+            await entity.async_delete_todo_items([uid])
+
+        client.async_update_task.assert_awaited_once_with(
+            task_id=task.id,
+            name="Rescheduled task",
+            description="Updated",
+            due_date=None,
+        )
+        client.async_complete_task.assert_awaited_once_with(task.id, None)
+        client.async_create_task.assert_awaited_once_with(
+            name="Created internally",
+            description="Created",
+            due_date=None,
+            created_by=None,
+        )
+        client.async_delete_task.assert_awaited_once_with(task.id)
+        assert coordinator.async_refresh.await_count == 4
+
+
+class TestTodoSetupInternalEntity:
+    """Tests for unconditional internal entity creation."""
+
+    @pytest.mark.asyncio
+    async def test_internal_entity_created_when_unified_list_disabled(self):
+        """Automation entity is always available even without the UI unified list."""
+        hass = MagicMock()
+        hass.data = {DOMAIN: {"entry": {}}}
+        hass.config.time_zone = "America/New_York"
+        hass.async_create_task = MagicMock()
+        entry = MagicMock()
+        entry.entry_id = "entry"
+        entry.data = {
+            CONF_URL: "https://donetick.example.com",
+            CONF_AUTH_TYPE: AUTH_TYPE_JWT,
+            CONF_REFRESH_INTERVAL: 300,
+            CONF_CREATE_UNIFIED_LIST: False,
+        }
+        entry.options = {}
+        client = AsyncMock()
+        client.async_get_circle_members.return_value = []
+        coordinator = MagicMock()
+        coordinator.data = {}
+        coordinator.async_config_entry_first_refresh = AsyncMock()
+        coordinator.async_add_listener = MagicMock()
+        auto_completion_manager = MagicMock()
+        add_entities = MagicMock()
+
+        with patch(
+            "custom_components.donetick.todo._create_api_client",
+            return_value=client,
+        ), patch(
+            "custom_components.donetick.todo.DonetickTaskCoordinator",
+            return_value=coordinator,
+        ), patch(
+            "custom_components.donetick.todo.AutoCompletionManager",
+            return_value=auto_completion_manager,
+        ):
+            await async_setup_todo_entry(hass, entry, add_entities)
+
+        entities = add_entities.call_args.args[0]
+        assert len(entities) == 1
+        assert isinstance(entities[0], DonetickInternalAllTasksList)
 
 
 class TestDonetickAssigneeTasksList:

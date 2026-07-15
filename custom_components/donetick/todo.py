@@ -1195,6 +1195,14 @@ async def async_setup_entry(
         entity = DonetickAllTasksList(coordinator, config_entry, hass)
         entity._circle_members = []  # Will be set after we get members
         entities.append(entity)
+
+    internal_entity = DonetickInternalAllTasksList(
+        coordinator,
+        config_entry,
+        hass,
+    )
+    internal_entity._circle_members = []
+    entities.append(internal_entity)
     
     # Get circle members for all entities (useful for custom cards)
     circle_members = []
@@ -1202,9 +1210,9 @@ async def async_setup_entry(
         circle_members = await client.async_get_circle_members()
         _LOGGER.debug("Found %d circle members", len(circle_members))
         
-        # Set circle members on unified entity if it exists
-        if entities and hasattr(entities[0], '_circle_members'):
-            entities[0]._circle_members = circle_members
+        for entity in entities:
+            if hasattr(entity, "_circle_members"):
+                entity._circle_members = circle_members
             
     except Exception as e:
         _LOGGER.error("Failed to get circle members: %s", e)
@@ -1381,6 +1389,10 @@ class DonetickTodoListBase(CoordinatorEntity, TodoListEntity):
         """Apply shared vacation visibility before entity-specific filtering."""
         return self._filter_tasks(self._get_visible_tasks())
 
+    def _get_all_tasks(self) -> list[DonetickTask]:
+        """Return every task from the coordinator."""
+        return self.coordinator.tasks_list
+
     def _get_visible_tasks(self) -> list[DonetickTask]:
         """Return tasks allowed by shared vacation visibility."""
         vacation_active = getattr(self.coordinator, "vacation_active", False)
@@ -1388,7 +1400,7 @@ class DonetickTodoListBase(CoordinatorEntity, TodoListEntity):
             vacation_active = False
         return [
             task
-            for task in self.coordinator.tasks_list
+            for task in self._get_all_tasks()
             if is_task_visible(task, vacation_active)
         ]
     
@@ -1616,6 +1628,34 @@ class DonetickAllTasksList(DonetickTodoListBase):
     def _filter_tasks(self, tasks):
         """Return all active tasks."""
         return [task for task in tasks if task.is_active]
+
+
+class DonetickInternalAllTasksList(DonetickAllTasksList):
+    """Unfiltered all-tasks entity for Home Assistant automations."""
+
+    _attr_entity_registry_enabled_default = True
+    _attr_entity_registry_visible_default = False
+
+    def __init__(
+        self,
+        coordinator: DataUpdateCoordinator,
+        config_entry: ConfigEntry,
+        hass: HomeAssistant = None,
+    ) -> None:
+        """Initialize the internal All Tasks list."""
+        super().__init__(coordinator, config_entry, hass)
+        self._attr_unique_id = f"dt_{config_entry.entry_id}_all_tasks_internal"
+        self._attr_name = "All Tasks Internal"
+
+    @property
+    def suggested_object_id(self) -> str:
+        """Return the stable automation-facing entity object ID."""
+        return "all_tasks_internal"
+
+    def _get_visible_tasks(self) -> list[DonetickTask]:
+        """Bypass vacation visibility for automation-safe task access."""
+        return self._get_all_tasks()
+
 
 class DonetickAssigneeTasksList(DonetickTodoListBase):
     """Donetick Assignee-specific Tasks List entity."""

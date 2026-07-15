@@ -17,6 +17,7 @@ from custom_components.donetick.todo import (
     DonetickAssigneeTasksList,
     DonetickDateFilteredTasksList,
     DonetickDateFilteredWithUnassignedList,
+    DonetickInternalAllTasksList,
     DonetickTodoListBase,
     DonetickTodoListEntity,
     DonetickTaskCoordinator,
@@ -87,6 +88,7 @@ def test_every_todo_list_subclass_is_covered_by_visibility_audit():
         DonetickAssigneeTasksList,
         DonetickDateFilteredTasksList,
         DonetickDateFilteredWithUnassignedList,
+        DonetickInternalAllTasksList,
         DonetickTimeOfDayTasksList,
         DonetickTimeOfDayWithUnassignedList,
         DonetickUpcomingTodayByTimeList,
@@ -98,6 +100,52 @@ def test_every_todo_list_subclass_is_covered_by_visibility_audit():
 
     source = inspect.getsource(todo_module)
     assert source.count("self.coordinator.tasks_list") == 1
+
+
+def test_internal_all_tasks_bypasses_vacation_visibility():
+    """The automation entity remains complete while user lists are filtered."""
+    hass = MagicMock()
+    hass.config.time_zone = "America/New_York"
+    entry = MagicMock()
+    entry.entry_id = "entry"
+    entry.data = {CONF_URL: "https://donetick.example.com"}
+    entry.options = {}
+    coordinator = DonetickTaskCoordinator(
+        hass,
+        AsyncMock(),
+        update_interval=timedelta(minutes=15),
+    )
+    hidden = DonetickTask.from_json(
+        {
+            "id": 1,
+            "name": "Hidden on vacation",
+            "isActive": True,
+            "hideOnVacation": True,
+        }
+    )
+    visible = DonetickTask.from_json(
+        {
+            "id": 2,
+            "name": "Always visible",
+            "isActive": True,
+            "hideOnVacation": False,
+        }
+    )
+    coordinator.data = {1: hidden, 2: visible}
+    coordinator._data_version = 1
+    coordinator.set_vacation_active(True)
+    user_entity = DonetickAllTasksList(coordinator, entry, hass)
+    internal_entity = DonetickInternalAllTasksList(coordinator, entry, hass)
+
+    assert [item.summary for item in user_entity.todo_items] == [
+        "Always visible"
+    ]
+    assert user_entity.state == 1
+    assert {item.summary for item in internal_entity.todo_items} == {
+        "Hidden on vacation",
+        "Always visible",
+    }
+    assert internal_entity.state == 2
 
 
 @pytest.mark.parametrize("entity_factory", _entity_factories())
