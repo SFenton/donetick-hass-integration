@@ -36,12 +36,14 @@ class TaskNotificationUpdateError(Exception):
         notification: bool,
         missing_task_ids: List[int],
         mismatched_task_ids: List[int],
+        mismatched_due_date_task_ids: List[int],
         task_errors: Dict[int, Exception],
     ) -> None:
         """Initialize the reconciliation error."""
         self.notification = notification
         self.missing_task_ids = missing_task_ids
         self.mismatched_task_ids = mismatched_task_ids
+        self.mismatched_due_date_task_ids = mismatched_due_date_task_ids
         self.task_errors = task_errors
 
         details = []
@@ -49,11 +51,18 @@ class TaskNotificationUpdateError(Exception):
             details.append(f"missing task IDs {missing_task_ids}")
         if mismatched_task_ids:
             details.append(f"mismatched task IDs {mismatched_task_ids}")
+        if mismatched_due_date_task_ids:
+            details.append(
+                f"due date mismatches for task IDs {mismatched_due_date_task_ids}"
+            )
         if task_errors:
+            affected_task_ids = set(mismatched_task_ids) | set(
+                mismatched_due_date_task_ids
+            )
             errors = {
                 task_id: str(error)
                 for task_id, error in task_errors.items()
-                if task_id in mismatched_task_ids
+                if task_id in affected_task_ids
             }
             if errors:
                 details.append(f"last errors {errors}")
@@ -333,6 +342,20 @@ class DonetickApiClient:
             _LOGGER.error("Error parsing Donetick response: %s", err)
             return []
 
+    async def async_get_task(self, task_id: int) -> DonetickTask:
+        """Get one task from Donetick."""
+        if not self.is_jwt_auth:
+            raise NotImplementedError(
+                "Fetching one task is only available with JWT authentication"
+            )
+
+        data = await self._request("GET", f"/api/v1/chores/{task_id}")
+        if isinstance(data, dict) and "res" in data:
+            data = data["res"]
+        if not isinstance(data, dict):
+            raise ValueError(f"Unexpected task response for Donetick task {task_id}")
+        return DonetickTask.from_json(data)
+
     async def async_get_active_tasks_by_name(self, name: str, require_assigned: bool = True) -> List[DonetickTask]:
         """Return active tasks whose names match the provided name.
 
@@ -377,7 +400,9 @@ class DonetickApiClient:
             "labelsV2": [{"id": label.id} for label in (task.labels_v2 or [])],
         }
         if task.next_due_date is not None:
-            payload["nextDueDate"] = task.next_due_date.isoformat()
+            due_date = task.next_due_date.isoformat()
+            payload["nextDueDate"] = due_date
+            payload["dueDate"] = due_date
         if task.frequency_metadata is not None:
             payload["frequencyMetadata"] = task.frequency_metadata
         if task.assigned_to is not None:
@@ -397,6 +422,7 @@ class DonetickApiClient:
         payload["isActive"] = task.is_active
         payload["requireApproval"] = task.require_approval
         payload["isPrivate"] = task.is_private
+        payload["hideOnVacation"] = task.hide_on_vacation
         if task.completion_window is not None:
             payload["completionWindow"] = task.completion_window
         return payload
@@ -423,6 +449,33 @@ class DonetickApiClient:
         except (KeyError, ValueError, json.JSONDecodeError) as err:
             _LOGGER.error("Error parsing Donetick circle members response: %s", err)
             return []
+
+    async def async_set_vacation_mode(self, active: bool) -> bool:
+        """Set the authenticated user's circle vacation mode."""
+        endpoint = (
+            "/api/v1/circles/vacation-mode"
+            if self.is_jwt_auth
+            else "/eapi/v1/circle/vacation-mode"
+        )
+
+        data = await self._request(
+            "PUT",
+            endpoint,
+            json_data={"active": active},
+        )
+
+        if isinstance(data, dict) and "res" in data:
+            data = data["res"]
+
+        if isinstance(data, dict) and "vacationModeActive" in data:
+            verified_active = bool(data["vacationModeActive"])
+            if verified_active != active:
+                raise RuntimeError(
+                    "Donetick vacation mode response did not match the requested state"
+                )
+            return verified_active
+
+        return active
 
     async def async_get_things(self) -> List[DonetickThing]:
         """Get things from Donetick."""
@@ -543,7 +596,7 @@ class DonetickApiClient:
         description: str = None,
         due_date: str = None,
         created_by: int = None,
-        # Extended properties (JWT only)
+        # Extended properties (mostly JWT only; hide_on_vacation also uses eAPI)
         frequency_type: str = None,
         frequency: int = None,
         frequency_metadata: dict = None,
@@ -558,12 +611,13 @@ class DonetickApiClient:
         is_rolling: bool = None,
         require_approval: bool = None,
         is_private: bool = None,
+        hide_on_vacation: bool = True,
         completion_window: int = None,
     ) -> DonetickTask:
         """Create a new task.
         
         With JWT auth, supports full ChoreReq properties.
-        With API key auth, only supports name, description, due_date, created_by.
+        With API key auth, supports ChoreLiteReq fields including hideOnVacation.
         """
         if self.is_jwt_auth:
             # If no assignees provided, use no_assignee strategy to avoid completion issues
@@ -577,6 +631,7 @@ class DonetickApiClient:
                 "frequencyType": frequency_type or FREQUENCY_ONCE,
                 "assignStrategy": effective_strategy,
                 "assignees": [],  # Always include empty array to avoid nil issues
+                "hideOnVacation": hide_on_vacation,
             }
             
             if description:
@@ -620,7 +675,10 @@ class DonetickApiClient:
             endpoint = "/api/v1/chores/"
         else:
             # eAPI ChoreLiteReq - limited fields
-            payload = {"name": name}
+            payload = {
+                "name": name,
+                "hideOnVacation": hide_on_vacation,
+            }
             if description:
                 payload["description"] = description
             if due_date:
@@ -663,7 +721,7 @@ class DonetickApiClient:
         description: str = None,
         due_date: str = None,
         next_due_date: str = None,
-        # Extended properties (JWT only)
+        # Extended properties (mostly JWT only; hide_on_vacation also uses eAPI)
         frequency_type: str = None,
         frequency: int = None,
         frequency_metadata: dict = None,
@@ -679,12 +737,13 @@ class DonetickApiClient:
         is_active: bool = None,
         require_approval: bool = None,
         is_private: bool = None,
+        hide_on_vacation: bool = None,
         completion_window: int = None,
     ) -> DonetickTask:
         """Update an existing task.
         
         With JWT auth, supports full ChoreReq properties.
-        With API key auth, only supports name, description, due_date, next_due_date.
+        With API key auth, supports ChoreLiteReq fields including hideOnVacation.
         
         Args:
             due_date: The task's base/original due date definition
@@ -735,6 +794,8 @@ class DonetickApiClient:
                 payload["requireApproval"] = require_approval
             if is_private is not None:
                 payload["isPrivate"] = is_private
+            if hide_on_vacation is not None:
+                payload["hideOnVacation"] = hide_on_vacation
             if completion_window is not None:
                 payload["completionWindow"] = completion_window
             
@@ -751,6 +812,8 @@ class DonetickApiClient:
                 payload["dueDate"] = due_date
             if next_due_date:
                 payload["nextDueDate"] = next_due_date
+            if hide_on_vacation is not None:
+                payload["hideOnVacation"] = hide_on_vacation
             
             if not payload:
                 raise ValueError("At least one field must be provided for update")
@@ -820,12 +883,21 @@ class DonetickApiClient:
             if task_id in verified_tasks_by_id
             and verified_tasks_by_id[task_id].notification != notification
         ]
+        mismatched_due_date_task_ids = [
+            task_id
+            for task_id in requested_task_ids
+            if task_id in current_tasks_by_id
+            and task_id in verified_tasks_by_id
+            and verified_tasks_by_id[task_id].next_due_date
+            != current_tasks_by_id[task_id].next_due_date
+        ]
 
-        if missing_task_ids or mismatched_task_ids:
+        if missing_task_ids or mismatched_task_ids or mismatched_due_date_task_ids:
             raise TaskNotificationUpdateError(
                 notification=notification,
                 missing_task_ids=missing_task_ids,
                 mismatched_task_ids=mismatched_task_ids,
+                mismatched_due_date_task_ids=mismatched_due_date_task_ids,
                 task_errors=task_errors,
             )
 
@@ -851,6 +923,17 @@ class DonetickApiClient:
         payload = self._task_update_payload(task)
         payload["notification"] = notification
         await self._request("PUT", "/api/v1/chores/", json_data=payload)
+        if task.next_due_date is not None:
+            updated_task = await self.async_get_task(task.id)
+            if updated_task.next_due_date != task.next_due_date:
+                restored = await self.async_update_due_date(
+                    task.id,
+                    task.next_due_date.isoformat(),
+                )
+                if not restored:
+                    raise RuntimeError(
+                        f"Could not restore due date for Donetick task {task.id}"
+                    )
 
     async def _async_retry_task_notification_operation(
         self,

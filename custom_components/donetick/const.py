@@ -17,6 +17,7 @@ CONF_CREATE_ASSIGNEE_LISTS = "create_assignee_lists"
 CONF_CREATE_DATE_FILTERED_LISTS = "create_date_filtered_lists"
 CONF_REFRESH_INTERVAL = "refresh_interval"
 CONF_WEBHOOK_ID = "webhook_id"
+CONF_VACATION_MODE_ENTITY = "vacation_mode_entity"
 
 # Auth types
 AUTH_TYPE_JWT = "jwt"

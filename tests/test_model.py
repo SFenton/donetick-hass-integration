@@ -128,6 +128,7 @@ class TestDonetickTask:
         assert task.completion_window == 3600
         assert task.require_approval is False
         assert task.is_private is False
+        assert task.hide_on_vacation is True
         
         # Check assignees
         assert len(task.assignees) == 2
@@ -173,7 +174,17 @@ class TestDonetickTask:
         assert task.completion_window is None
         assert task.require_approval is False
         assert task.is_private is False
+        assert task.hide_on_vacation is True
         assert task.sub_tasks is None
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_from_json_hide_on_vacation(self, value):
+        """Test parsing explicit hideOnVacation values."""
+        task = DonetickTask.from_json(
+            {"id": 20, "name": "Vacation task", "hideOnVacation": value}
+        )
+
+        assert task.hide_on_vacation is value
 
     def test_from_json_null_assignees(self):
         """Test parsing chore with null assignees."""

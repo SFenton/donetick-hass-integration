@@ -85,6 +85,11 @@ _recently_completed_task_ids: dict[int, datetime] = {}
 _completion_lock = asyncio.Lock()
 
 
+def is_task_visible(task: DonetickTask, vacation_active: bool) -> bool:
+    """Return whether a task should be exposed in Home Assistant todo lists."""
+    return not (vacation_active and task.hide_on_vacation)
+
+
 def _is_frequent_recurrence(task: DonetickTask) -> bool:
     """Check if a task recurs too frequently to show in Upcoming.
     
@@ -539,7 +544,20 @@ class NotificationManager:
 
     def is_task_enabled(self, task: DonetickTask) -> bool:
         """Check if past-due notifications are enabled for this task."""
-        return self.is_enabled() and task.notification
+        coordinator = self._hass.data.get(DOMAIN, {}).get(
+            self._config_entry.entry_id,
+            {},
+        ).get("coordinator")
+        vacation_active = (
+            coordinator is not None
+            and isinstance(getattr(coordinator, "vacation_active", False), bool)
+            and coordinator.vacation_active
+        )
+        return (
+            self.is_enabled()
+            and task.notification
+            and is_task_visible(task, vacation_active)
+        )
     
     def get_notify_service(self, assignee_id: int | None) -> str | None:
         """Get the notification service for a given assignee."""
@@ -1009,6 +1027,8 @@ class DonetickTaskCoordinator(DataUpdateCoordinator):
         self._tasks_by_id: dict[int, DonetickTask] = {}
         self._task_hashes: dict[int, str] = {}
         self._data_version: int = 0  # Increments only when data changes
+        self._visibility_version: int = 0
+        self._vacation_active = False
     
     def _hash_task(self, task: DonetickTask) -> str:
         """Generate a hash of task data to detect changes."""
@@ -1022,6 +1042,7 @@ class DonetickTaskCoordinator(DataUpdateCoordinator):
             "assigned_to": task.assigned_to,
             "priority": task.priority,
             "frequency_type": task.frequency_type,
+            "hide_on_vacation": task.hide_on_vacation,
         }
         return hashlib.md5(json.dumps(task_data, sort_keys=True).encode()).hexdigest()
     
@@ -1068,6 +1089,25 @@ class DonetickTaskCoordinator(DataUpdateCoordinator):
     def data_version(self) -> int:
         """Return the current data version (increments on changes)."""
         return self._data_version
+
+    @property
+    def cache_version(self) -> tuple[int, int]:
+        """Return task and visibility versions used by entity caches."""
+        return (self._data_version, self._visibility_version)
+
+    @property
+    def vacation_active(self) -> bool:
+        """Return whether Home Assistant vacation mode is active."""
+        return self._vacation_active
+
+    @callback
+    def set_vacation_active(self, active: bool) -> None:
+        """Update vacation visibility and notify entities immediately."""
+        if self._vacation_active == active:
+            return
+        self._vacation_active = active
+        self._visibility_version += 1
+        self.async_update_listeners()
     
     @property
     def tasks_list(self) -> list[DonetickTask]:
@@ -1124,6 +1164,9 @@ async def async_setup_entry(
     
     # Store the coordinator in hass.data so the webhook can trigger refreshes
     hass.data[DOMAIN][config_entry.entry_id]["coordinator"] = coordinator
+    vacation_manager = hass.data[DOMAIN][config_entry.entry_id].get("vacation_manager")
+    if vacation_manager:
+        vacation_manager.attach_coordinator(coordinator)
     
     # Create and store auto-completion manager for past-due recurrent tasks
     auto_completion_manager = AutoCompletionManager(hass, config_entry, client)
@@ -1304,7 +1347,7 @@ class DonetickTodoListBase(CoordinatorEntity, TodoListEntity):
         self._config_entry = config_entry
         self._hass = hass
         self._cached_todo_items: list[TodoItem] | None = None
-        self._cached_data_version: int = -1
+        self._cached_data_version: int | tuple[int, int] = -1
 
     def _get_local_now(self) -> datetime:
         """Get the current time in the Home Assistant configured timezone."""
@@ -1326,11 +1369,32 @@ class DonetickTodoListBase(CoordinatorEntity, TodoListEntity):
     def _filter_tasks(self, tasks: list[DonetickTask]) -> list[DonetickTask]:
         """Filter tasks based on entity type. Override in subclasses."""
         return tasks
+
+    def _get_cache_version(self) -> int | tuple[int, int]:
+        """Get a cache version compatible with real and mocked coordinators."""
+        cache_version = getattr(self.coordinator, "cache_version", None)
+        if isinstance(cache_version, tuple):
+            return cache_version
+        return self.coordinator.data_version
+
+    def _get_filtered_tasks(self) -> list[DonetickTask]:
+        """Apply shared vacation visibility before entity-specific filtering."""
+        return self._filter_tasks(self._get_visible_tasks())
+
+    def _get_visible_tasks(self) -> list[DonetickTask]:
+        """Return tasks allowed by shared vacation visibility."""
+        vacation_active = getattr(self.coordinator, "vacation_active", False)
+        if not isinstance(vacation_active, bool):
+            vacation_active = False
+        return [
+            task
+            for task in self.coordinator.tasks_list
+            if is_task_visible(task, vacation_active)
+        ]
     
     def _build_todo_items(self) -> list[TodoItem]:
         """Build the list of todo items from filtered tasks."""
-        all_tasks = self.coordinator.tasks_list
-        filtered_tasks = self._filter_tasks(all_tasks)
+        filtered_tasks = self._get_filtered_tasks()
         return [
             TodoItem(
                 summary=task.name,
@@ -1348,12 +1412,12 @@ class DonetickTodoListBase(CoordinatorEntity, TodoListEntity):
             return None
         
         # Check if we need to rebuild the cache
-        current_version = self.coordinator.data_version
+        current_version = self._get_cache_version()
         if self._cached_data_version != current_version:
             self._cached_todo_items = self._build_todo_items()
             self._cached_data_version = current_version
             _LOGGER.debug(
-                "%s: Rebuilt todo items cache (version %d, %d items)",
+                "%s: Rebuilt todo items cache (version %s, %d items)",
                 self.entity_id or self.name,
                 current_version,
                 len(self._cached_todo_items)
@@ -1616,10 +1680,11 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
             return None
         
         # First check: has server data changed?
-        server_changed = self._cached_data_version != self.coordinator.data_version
+        current_version = self._get_cache_version()
+        server_changed = self._cached_data_version != current_version
         
         # Get current filtered tasks
-        filtered_tasks = self._filter_tasks(self.coordinator.tasks_list)
+        filtered_tasks = self._get_filtered_tasks()
         current_task_ids = {task.id for task in filtered_tasks}
         
         # Second check: have tasks migrated in/out due to time?
@@ -1640,7 +1705,7 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
             # Update caches
             old_task_ids = self._cached_task_ids
             self._cached_task_ids = current_task_ids
-            self._cached_data_version = self.coordinator.data_version
+            self._cached_data_version = current_version
             
             # Log what changed
             if time_migration and not server_changed:
@@ -1652,8 +1717,8 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
                 )
             elif server_changed:
                 _LOGGER.debug(
-                    "%s: Rebuilt due to server changes (version %d, %d items)",
-                    self._attr_name, self.coordinator.data_version, len(self._cached_todo_items)
+                    "%s: Rebuilt due to server changes (version %s, %d items)",
+                    self._attr_name, current_version, len(self._cached_todo_items)
                 )
             
             # Reschedule transitions when list content changes
@@ -1721,7 +1786,7 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
             return
         
         # Get current filtered tasks (past due tasks for this assignee)
-        filtered_tasks = self._filter_tasks(self.coordinator.tasks_list)
+        filtered_tasks = self._get_filtered_tasks()
         current_task_ids = {task.id for task in filtered_tasks}
         
         # Determine if this is an unassigned list
@@ -1858,7 +1923,7 @@ class DonetickDateFilteredTasksList(DonetickTodoListBase):
         
         next_times: list[datetime] = []
         
-        for task in self.coordinator.tasks_list:
+        for task in self._get_visible_tasks():
             if not task.is_active or task.next_due_date is None:
                 continue
             
@@ -2107,7 +2172,7 @@ class DonetickDateFilteredWithUnassignedList(DonetickDateFilteredTasksList):
         
         next_times: list[datetime] = []
         
-        for task in self.coordinator.tasks_list:
+        for task in self._get_visible_tasks():
             if not task.is_active or task.next_due_date is None:
                 continue
             
@@ -2210,9 +2275,10 @@ class DonetickTimeOfDayTasksList(DonetickTodoListBase):
         if self.coordinator.data is None:
             return None
         
-        server_changed = self._cached_data_version != self.coordinator.data_version
+        current_version = self._get_cache_version()
+        server_changed = self._cached_data_version != current_version
         
-        filtered_tasks = self._filter_tasks(self.coordinator.tasks_list)
+        filtered_tasks = self._get_filtered_tasks()
         current_task_ids = {task.id for task in filtered_tasks}
         
         time_migration = current_task_ids != self._cached_task_ids
@@ -2230,7 +2296,7 @@ class DonetickTimeOfDayTasksList(DonetickTodoListBase):
             
             old_task_ids = self._cached_task_ids
             self._cached_task_ids = current_task_ids
-            self._cached_data_version = self.coordinator.data_version
+            self._cached_data_version = current_version
             
             if time_migration and not server_changed:
                 added = current_task_ids - old_task_ids
@@ -2241,8 +2307,8 @@ class DonetickTimeOfDayTasksList(DonetickTodoListBase):
                 )
             elif server_changed:
                 _LOGGER.debug(
-                    "%s: Rebuilt due to server changes (version %d, %d items)",
-                    self._attr_name, self.coordinator.data_version, len(self._cached_todo_items)
+                    "%s: Rebuilt due to server changes (version %s, %d items)",
+                    self._attr_name, current_version, len(self._cached_todo_items)
                 )
             
             self._schedule_next_transition()
@@ -2315,7 +2381,7 @@ class DonetickTimeOfDayTasksList(DonetickTodoListBase):
         buffer = timedelta(seconds=1)
         next_times: list[datetime] = []
         
-        for task in self.coordinator.tasks_list:
+        for task in self._get_visible_tasks():
             if not task.is_active or task.next_due_date is None:
                 continue
             
@@ -2638,7 +2704,7 @@ class DonetickUpcomingTodayByTimeList(DonetickTimeOfDayTasksList):
         # Also schedule when tasks become past due (exit the list)
         next_boundary = self._get_next_boundary(local_now)
         if next_boundary is not None:
-            for task in self.coordinator.tasks_list:
+            for task in self._get_visible_tasks():
                 if not task.is_active or task.next_due_date is None:
                     continue
                 

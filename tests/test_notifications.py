@@ -277,6 +277,50 @@ class TestNotificationManagerSendNotification:
         mock_hass.services.async_call.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_hidden_task_notification_blocked_during_vacation(
+        self,
+        mock_hass,
+        mock_config_entry,
+        sample_task_p1,
+    ):
+        """Integration notifications use shared vacation visibility."""
+        coordinator = MagicMock()
+        coordinator.vacation_active = True
+        mock_hass.data[DOMAIN][mock_config_entry.entry_id] = {
+            "coordinator": coordinator,
+        }
+        sample_task_p1.hide_on_vacation = True
+        manager = NotificationManager(mock_hass, mock_config_entry)
+
+        result = await manager.send_past_due_notification(sample_task_p1)
+
+        assert result is False
+        mock_hass.services.async_call.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unassigned_hidden_task_notification_blocked_during_vacation(
+        self,
+        mock_hass,
+        mock_config_entry,
+        sample_task_no_assignee,
+    ):
+        """Unassigned integration notifications also use shared visibility."""
+        coordinator = MagicMock()
+        coordinator.vacation_active = True
+        mock_hass.data[DOMAIN][mock_config_entry.entry_id] = {
+            "coordinator": coordinator,
+        }
+        sample_task_no_assignee.hide_on_vacation = True
+        manager = NotificationManager(mock_hass, mock_config_entry)
+
+        result = await manager.send_unassigned_past_due_notification(
+            sample_task_no_assignee
+        )
+
+        assert result == 0
+        mock_hass.services.async_call.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_send_notification_no_assignee(self, mock_hass, mock_config_entry, sample_task_no_assignee):
         """Test notification not sent when task has no assignee."""
         manager = NotificationManager(mock_hass, mock_config_entry)
@@ -451,6 +495,39 @@ class TestNotificationManagerReminders:
         ):
             manager.schedule_reminder(sample_task_p1, datetime.now())
             sample_task_p1.notification = False
+            await callbacks[0](datetime.now())
+
+        mock_hass.services.async_call.assert_not_called()
+        assert sample_task_p1.id not in _notification_reminders
+
+    @pytest.mark.asyncio
+    async def test_existing_reminder_cannot_fire_during_vacation(
+        self,
+        mock_hass,
+        mock_config_entry,
+        sample_task_p1,
+    ):
+        """A reminder scheduled before vacation cannot send while hidden."""
+        callbacks = []
+
+        def capture_callback(hass, callback, reminder_time):
+            callbacks.append(callback)
+            return MagicMock()
+
+        manager = NotificationManager(mock_hass, mock_config_entry)
+        coordinator = MagicMock()
+        coordinator.data = {sample_task_p1.id: sample_task_p1}
+        coordinator.vacation_active = False
+        mock_hass.data[DOMAIN][mock_config_entry.entry_id] = {
+            "coordinator": coordinator,
+        }
+
+        with patch(
+            "custom_components.donetick.todo.async_track_point_in_time",
+            side_effect=capture_callback,
+        ):
+            manager.schedule_reminder(sample_task_p1, datetime.now())
+            coordinator.vacation_active = True
             await callbacks[0](datetime.now())
 
         mock_hass.services.async_call.assert_not_called()

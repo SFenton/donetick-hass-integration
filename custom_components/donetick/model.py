@@ -107,6 +107,7 @@ class DonetickTask:
     completion_window: Optional[int] = None
     require_approval: bool = False
     is_private: bool = False
+    hide_on_vacation: bool = True
     
     @classmethod
     def from_json(cls, data: dict) -> "DonetickTask":
@@ -215,6 +216,7 @@ class DonetickTask:
             completion_window=data.get("completionWindow"),
             require_approval=data.get("requireApproval", False),
             is_private=data.get("isPrivate", False),
+            hide_on_vacation=data.get("hideOnVacation", True),
         )
     
     @classmethod

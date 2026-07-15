@@ -11,7 +11,7 @@
             },
             "jwt_auth": {
                 "title": "Login to Donetick",
-                "description": "Enter your Donetick username and password for {url}. This provides access to all features including task priority, labels, frequency settings, and more.",
+                "description": "Enter your Donetick username and password for {url}.",
                 "data": {
                     "username": "Username",
                     "password": "Password"
@@ -19,7 +19,7 @@
             },
             "api_key_auth": {
                 "title": "API Key Authentication",
-                "description": "Enter your Donetick API key for {url}. Note: API key authentication has limited features. For full access, use username/password authentication.",
+                "description": "Enter your Donetick API key for {url}.",
                 "data": {
                     "token": "API Token"
                 }
@@ -39,7 +39,8 @@
                     "upcoming_days": "Only show upcoming tasks within this many days (1-365)",
                     "include_unassigned_in_assignee_lists": "Include unassigned tasks in assignee lists",
                     "auto_complete_past_due_recurrent": "Auto-complete past due recurring tasks at midnight",
-                    "notify_on_past_due": "Send notifications when tasks become past due"
+                    "notify_on_past_due": "Send notifications when tasks become past due",
+                    "vacation_mode_entity": "Vacation Mode entity (optional)"
                 }
             },
             "notifications": {
@@ -71,18 +72,14 @@
                     "upcoming_days": "Only show upcoming tasks within this many days (1-365)",
                     "include_unassigned_in_assignee_lists": "Include unassigned tasks in assignee lists",
                     "auto_complete_past_due_recurrent": "Auto-complete past due recurring tasks at midnight",
-                    "notify_on_past_due": "Send notifications when tasks become past due"
+                    "notify_on_past_due": "Send notifications when tasks become past due",
+                    "vacation_mode_entity": "Vacation Mode entity (optional)"
                 }
             },
             "notifications": {
                 "title": "Configure Notifications",
                 "description": "Select which notification service to use for each person. Leave empty to skip notifications for that person."
             }
-        },
-        "error": {
-            "cannot_connect": "Failed to connect to Donetick",
-            "invalid_auth": "Invalid authentication",
-            "unknown": "Unexpected error"
         },
         "abort": {
             "configuration updated": "Configuration updated successfully"

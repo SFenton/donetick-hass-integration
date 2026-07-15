@@ -19,6 +19,8 @@ from homeassistant.helpers.selector import (
     SelectSelectorMode,
     TimeSelector,
     TimeSelectorConfig,
+    EntitySelector,
+    EntitySelectorConfig,
 )
 
 from .const import (
@@ -49,6 +51,7 @@ from .const import (
     DEFAULT_MORNING_CUTOFF,
     DEFAULT_AFTERNOON_CUTOFF,
     CONF_AUTO_COMPLETE_PAST_DUE,
+    CONF_VACATION_MODE_ENTITY,
 )
 from .api import DonetickApiClient, AuthenticationError
 
@@ -273,6 +276,7 @@ class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_UPCOMING_DAYS: user_input.get(CONF_UPCOMING_DAYS, DEFAULT_UPCOMING_DAYS),
                 CONF_INCLUDE_UNASSIGNED: user_input.get(CONF_INCLUDE_UNASSIGNED, False),
                 CONF_AUTO_COMPLETE_PAST_DUE: user_input.get(CONF_AUTO_COMPLETE_PAST_DUE, False),
+                CONF_VACATION_MODE_ENTITY: user_input.get(CONF_VACATION_MODE_ENTITY, ""),
             }
             
             # If notifications enabled and we have circle members, proceed to notification config
@@ -311,6 +315,9 @@ class DonetickConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_INCLUDE_UNASSIGNED, default=False): bool,
                 vol.Optional(CONF_AUTO_COMPLETE_PAST_DUE, default=False): bool,
                 vol.Optional(CONF_NOTIFY_ON_PAST_DUE, default=False): bool,
+                vol.Optional(CONF_VACATION_MODE_ENTITY): EntitySelector(
+                    EntitySelectorConfig()
+                ),
             }),
         )
 
@@ -411,6 +418,7 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_UPCOMING_DAYS: user_input.get(CONF_UPCOMING_DAYS, DEFAULT_UPCOMING_DAYS),
                 CONF_INCLUDE_UNASSIGNED: user_input.get(CONF_INCLUDE_UNASSIGNED, False),
                 CONF_AUTO_COMPLETE_PAST_DUE: user_input.get(CONF_AUTO_COMPLETE_PAST_DUE, False),
+                CONF_VACATION_MODE_ENTITY: user_input.get(CONF_VACATION_MODE_ENTITY, ""),
             }
             
             # Preserve auth credentials based on auth type
@@ -506,6 +514,15 @@ class DonetickOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_NOTIFY_ON_PAST_DUE,
                     default=self.entry.data.get(CONF_NOTIFY_ON_PAST_DUE, False)
                 ): bool,
+                vol.Optional(
+                    CONF_VACATION_MODE_ENTITY,
+                    description={
+                        "suggested_value": self.entry.data.get(
+                            CONF_VACATION_MODE_ENTITY,
+                            "",
+                        )
+                    },
+                ): EntitySelector(EntitySelectorConfig()),
             }),
             description_placeholders={
                 "auth_type": auth_type_label,

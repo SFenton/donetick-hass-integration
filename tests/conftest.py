@@ -101,6 +101,7 @@ def sample_chore_json():
         "completionWindow": 3600,
         "requireApproval": False,
         "isPrivate": False,
+        "hideOnVacation": True,
         "subTasks": [
             {
                 "id": 101,

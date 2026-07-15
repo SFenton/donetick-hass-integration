@@ -134,6 +134,13 @@ create_task:
       required: false
       selector:
         boolean:
+    hide_on_vacation:
+      name: Hide On Vacation
+      description: Hide this task from Home Assistant todo lists while Vacation Mode is on
+      required: false
+      default: true
+      selector:
+        boolean:
     active_task_name_exclusivity:
       name: Only Create If No Active Same-Name Task
       description: If true, only create this task if there are no other active tasks (assigned to anyone) with the same name.
@@ -253,6 +260,12 @@ update_task:
     is_private:
       name: Private Task
       description: Make task private (only visible to creator and assignees) - Requires username/password auth
+      required: false
+      selector:
+        boolean:
+    hide_on_vacation:
+      name: Hide On Vacation
+      description: Hide this task from Home Assistant todo lists while Vacation Mode is on
       required: false
       selector:
         boolean:
@@ -478,6 +491,13 @@ create_task_form:
       description: Only visible to creator and assignees?
       required: false
       default: false
+      selector:
+        boolean:
+    hide_on_vacation:
+      name: Hide On Vacation
+      description: Hide this task from Home Assistant todo lists while Vacation Mode is on
+      required: false
+      default: true
       selector:
         boolean:
     config_entry_id:

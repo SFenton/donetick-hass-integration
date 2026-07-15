@@ -14,9 +14,11 @@ from custom_components.donetick.todo import (
     DonetickAllTasksList,
     DonetickAssigneeTasksList,
     DonetickDateFilteredTasksList,
+    DonetickDateFilteredWithUnassignedList,
     DonetickTimeOfDayTasksList,
     DonetickTimeOfDayWithUnassignedList,
     DonetickUpcomingTodayByTimeList,
+    DonetickUpcomingTodayByTimeWithUnassignedList,
     DonetickUpcomingTodayByTimeAndFutureList,
     DonetickUpcomingTodayByTimeAndFutureWithUnassignedList,
     _is_frequent_recurrence,
@@ -209,6 +211,23 @@ class TestDonetickTaskCoordinator:
         """Test get_task returns None when no data."""
         coordinator.data = None
         assert coordinator.get_task(1) is None
+
+    def test_vacation_visibility_version_does_not_change_task_version(
+        self,
+        coordinator,
+    ):
+        """Vacation changes invalidate entity caches without changing server data."""
+        coordinator.data = {}
+        initial_data_version = coordinator.data_version
+        initial_cache_version = coordinator.cache_version
+
+        with patch.object(coordinator, "async_update_listeners") as update_listeners:
+            coordinator.set_vacation_active(True)
+
+        assert coordinator.vacation_active is True
+        assert coordinator.data_version == initial_data_version
+        assert coordinator.cache_version != initial_cache_version
+        update_listeners.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_task_returns_task(self, coordinator, mock_client, sample_chore_json):

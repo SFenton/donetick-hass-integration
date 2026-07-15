@@ -21,8 +21,10 @@ from .const import (
     AUTH_TYPE_API_KEY,
     CONF_SHOW_DUE_IN,
     CONF_WEBHOOK_ID,
+    CONF_VACATION_MODE_ENTITY,
 )
 from .api import DonetickApiClient
+from .vacation import VacationModeManager
 
 
 def normalize_datetime_string(datetime_str: str, local_tz: zoneinfo.ZoneInfo) -> str:
@@ -263,6 +265,7 @@ CREATE_TASK_SCHEMA = vol.Schema({
     vol.Optional("notification"): cv.boolean,
     vol.Optional("require_approval"): cv.boolean,
     vol.Optional("is_private"): cv.boolean,
+    vol.Optional("hide_on_vacation", default=True): cv.boolean,
     vol.Optional("config_entry_id"): cv.string,
 })
 
@@ -286,6 +289,7 @@ UPDATE_TASK_SCHEMA = vol.Schema({
     vol.Optional("notification"): cv.boolean,
     vol.Optional("require_approval"): cv.boolean,
     vol.Optional("is_private"): cv.boolean,
+    vol.Optional("hide_on_vacation"): cv.boolean,
     vol.Optional("config_entry_id"): cv.string,
 })
 
@@ -323,12 +327,67 @@ CREATE_TASK_FORM_SCHEMA = vol.Schema({
     vol.Optional("notification", default=True): cv.boolean,
     vol.Optional("require_approval", default=False): cv.boolean,
     vol.Optional("is_private", default=False): cv.boolean,
+    vol.Optional("hide_on_vacation", default=True): cv.boolean,
     vol.Optional("config_entry_id"): cv.string,
 })
+
+
+async def _async_cleanup_entry_runtime(
+    hass: HomeAssistant,
+    entry_id: str,
+    unregister_webhook: bool,
+) -> None:
+    """Clean up partially initialized runtime state for an entry."""
+    entry_data = hass.data.get(DOMAIN, {}).get(entry_id)
+    if not entry_data:
+        return
+
+    vacation_manager = entry_data.get("vacation_manager")
+    if vacation_manager:
+        await vacation_manager.async_stop()
+
+    unsubscribe = entry_data.get("notification_action_unsub")
+    if unsubscribe:
+        unsubscribe()
+
+    auto_completion_manager = entry_data.get("auto_completion_manager")
+    if auto_completion_manager:
+        auto_completion_manager.cancel_all()
+
+    if unregister_webhook and (webhook_id := entry_data.get("webhook_id")):
+        try:
+            await async_unregister_webhook(hass, webhook_id)
+        except Exception as err:
+            _LOGGER.warning(
+                "Could not unregister Donetick webhook during setup cleanup: %s",
+                err,
+            )
+
+    hass.data[DOMAIN].pop(entry_id, None)
+
+    if not hass.data[DOMAIN]:
+        for service_name in [
+            SERVICE_COMPLETE_TASK,
+            SERVICE_CREATE_TASK,
+            SERVICE_UPDATE_TASK,
+            SERVICE_DELETE_TASK,
+            SERVICE_CREATE_TASK_FORM,
+            SERVICE_SET_TASK_NOTIFICATIONS,
+        ]:
+            if hass.services.has_service(DOMAIN, service_name):
+                hass.services.async_remove(DOMAIN, service_name)
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Donetick from a config entry."""
     hass.data.setdefault(DOMAIN, {})
+
+    if entry.entry_id in hass.data[DOMAIN]:
+        await _async_cleanup_entry_runtime(
+            hass,
+            entry.entry_id,
+            unregister_webhook=True,
+        )
     
     # Generate or retrieve webhook ID
     webhook_id = entry.data.get(CONF_WEBHOOK_ID)
@@ -352,6 +411,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_URL: entry.data[CONF_URL],
         CONF_AUTH_TYPE: auth_type,
         CONF_SHOW_DUE_IN: entry.data.get(CONF_SHOW_DUE_IN, 7),
+        CONF_VACATION_MODE_ENTITY: entry.data.get(CONF_VACATION_MODE_ENTITY, ""),
         "webhook_id": webhook_id,
         "webhook_url": webhook_url,
     }
@@ -362,6 +422,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN][entry.entry_id][CONF_PASSWORD] = entry.data.get(CONF_PASSWORD)
     else:
         hass.data[DOMAIN][entry.entry_id][CONF_TOKEN] = entry.data.get(CONF_TOKEN)
+
+    vacation_manager = VacationModeManager(
+        hass,
+        entry,
+        _get_api_client(hass, entry.entry_id),
+    )
+    hass.data[DOMAIN][entry.entry_id]["vacation_manager"] = vacation_manager
+    entry.async_on_unload(vacation_manager.stop)
+    try:
+        await vacation_manager.async_start()
+    except Exception:
+        await _async_cleanup_entry_runtime(
+            hass,
+            entry.entry_id,
+            unregister_webhook=True,
+        )
+        raise
     
     # Register services before setting up platforms
     async def complete_task_handler(call: ServiceCall) -> None:
@@ -435,7 +512,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     hass.data[DOMAIN][entry.entry_id]["notification_action_unsub"] = unsubscribe
     
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception:
+        await _async_cleanup_entry_runtime(
+            hass,
+            entry.entry_id,
+            unregister_webhook=True,
+        )
+        raise
 
     entry.add_update_listener(async_reload_entry)
     
@@ -518,6 +603,7 @@ async def async_create_task_service(hass: HomeAssistant, call: ServiceCall) -> N
     notification = call.data.get("notification")
     require_approval = call.data.get("require_approval")
     is_private = call.data.get("is_private")
+    hide_on_vacation = call.data.get("hide_on_vacation", True)
     
     # Parse assignees from comma-separated string to list of ints
     assignees = None
@@ -562,6 +648,7 @@ async def async_create_task_service(hass: HomeAssistant, call: ServiceCall) -> N
             notification=notification,
             require_approval=require_approval,
             is_private=is_private,
+            hide_on_vacation=hide_on_vacation,
         )
         _LOGGER.info("Task '%s' created successfully with ID %d", name, result.id)
         
@@ -589,6 +676,7 @@ async def async_update_task_service(hass: HomeAssistant, call: ServiceCall) -> N
     notification = call.data.get("notification")
     require_approval = call.data.get("require_approval")
     is_private = call.data.get("is_private")
+    hide_on_vacation = call.data.get("hide_on_vacation")
     
     # Parse assignees from comma-separated string to list of ints
     assignees = None
@@ -622,6 +710,7 @@ async def async_update_task_service(hass: HomeAssistant, call: ServiceCall) -> N
             notification=notification,
             require_approval=require_approval,
             is_private=is_private,
+            hide_on_vacation=hide_on_vacation,
         )
         _LOGGER.info("Task %d updated successfully", task_id)
         
@@ -805,6 +894,7 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
     notification = call.data.get("notification", True)
     require_approval = call.data.get("require_approval", False)
     is_private = call.data.get("is_private", False)
+    hide_on_vacation = call.data.get("hide_on_vacation", True)
     
     # Process due_date - handle datetime from UI selector
     due_date = None
@@ -907,6 +997,7 @@ async def async_create_task_form_service(hass: HomeAssistant, call: ServiceCall)
             notification=notification,
             require_approval=require_approval,
             is_private=is_private,
+            hide_on_vacation=hide_on_vacation,
         )
         _LOGGER.info("Task '%s' created successfully with ID %d (via form)", name, result.id)
         
@@ -1116,6 +1207,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         auto_completion_manager = hass.data[DOMAIN][entry.entry_id].get("auto_completion_manager")
         if auto_completion_manager:
             auto_completion_manager.cancel_all()
+
+        vacation_manager = hass.data[DOMAIN][entry.entry_id].get("vacation_manager")
+        if vacation_manager:
+            await vacation_manager.async_stop()
     
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:

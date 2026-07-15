@@ -30,6 +30,7 @@ from custom_components.donetick.const import (
     CONF_CREATE_DATE_FILTERED_LISTS,
     CONF_REFRESH_INTERVAL,
     DEFAULT_REFRESH_INTERVAL,
+    CONF_VACATION_MODE_ENTITY,
 )
 
 
@@ -400,6 +401,10 @@ class TestDonetickConfigFlowOptions:
         assert result["step_id"] == "options"
         assert CONF_SHOW_DUE_IN in str(result["data_schema"])
         assert CONF_CREATE_UNIFIED_LIST in str(result["data_schema"])
+        assert CONF_VACATION_MODE_ENTITY in str(result["data_schema"])
+        assert (
+            result["data_schema"]({}).get(CONF_VACATION_MODE_ENTITY, "") == ""
+        )
 
     @pytest.mark.asyncio
     async def test_options_step_creates_entry(self, config_flow):
@@ -413,6 +418,7 @@ class TestDonetickConfigFlowOptions:
                 CONF_CREATE_ASSIGNEE_LISTS: False,
                 CONF_CREATE_DATE_FILTERED_LISTS: False,
                 CONF_REFRESH_INTERVAL: {"hours": 0, "minutes": 5, "seconds": 0},
+                CONF_VACATION_MODE_ENTITY: "input_boolean.vacation_mode",
             })
             
             mock_create.assert_called_once()
@@ -421,6 +427,10 @@ class TestDonetickConfigFlowOptions:
             assert call_args[1]["data"][CONF_SHOW_DUE_IN] == 7
             assert call_args[1]["data"][CONF_CREATE_UNIFIED_LIST] is True
             assert call_args[1]["data"][CONF_REFRESH_INTERVAL] == 300
+            assert (
+                call_args[1]["data"][CONF_VACATION_MODE_ENTITY]
+                == "input_boolean.vacation_mode"
+            )
 
     @pytest.mark.asyncio
     async def test_options_step_all_lists_enabled(self, config_flow):
@@ -486,10 +496,14 @@ class TestDonetickOptionsFlowHandler:
         
         assert result["type"] == "form"
         assert result["step_id"] == "init"
+        assert CONF_VACATION_MODE_ENTITY in str(result["data_schema"])
 
     @pytest.mark.asyncio
     async def test_init_step_preserves_jwt_credentials(self, options_flow):
         """Test that init step preserves JWT credentials."""
+        options_flow.entry.options = {
+            "existing_option": "keep-me",
+        }
         with patch.object(options_flow, 'async_create_entry') as mock_create:
             with patch.object(options_flow, 'async_abort') as mock_abort:
                 mock_create.return_value = {"type": "create_entry"}
@@ -500,6 +514,7 @@ class TestDonetickOptionsFlowHandler:
                     CONF_CREATE_ASSIGNEE_LISTS: True,
                     CONF_CREATE_DATE_FILTERED_LISTS: False,
                     CONF_REFRESH_INTERVAL: {"hours": 0, "minutes": 10, "seconds": 0},
+                    CONF_VACATION_MODE_ENTITY: "input_boolean.vacation_mode",
                 })
                 
                 # Check that config entry was updated
@@ -510,6 +525,13 @@ class TestDonetickOptionsFlowHandler:
                 assert updated_data[CONF_USERNAME] == "testuser"
                 assert updated_data[CONF_PASSWORD] == "testpass"
                 assert updated_data[CONF_SHOW_DUE_IN] == 14
+                assert (
+                    updated_data[CONF_VACATION_MODE_ENTITY]
+                    == "input_boolean.vacation_mode"
+                )
+                assert call_args[1]["options"] == {
+                    "existing_option": "keep-me",
+                }
 
     @pytest.mark.asyncio
     async def test_init_step_preserves_api_key_credentials(self, mock_hass):

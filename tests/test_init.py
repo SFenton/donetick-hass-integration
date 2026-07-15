@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import voluptuous as vol
 from datetime import datetime
 import zoneinfo
+import yaml
 from homeassistant.exceptions import HomeAssistantError
 
 import sys
@@ -27,6 +28,7 @@ from custom_components.donetick import (
     COMPLETE_TASK_SCHEMA,
     CREATE_TASK_SCHEMA,
     UPDATE_TASK_SCHEMA,
+    CREATE_TASK_FORM_SCHEMA,
     DELETE_TASK_SCHEMA,
     SET_TASK_NOTIFICATIONS_SCHEMA,
     SERVICE_COMPLETE_TASK,
@@ -81,6 +83,7 @@ class TestServiceSchemas:
         data = {"name": "Test Task"}
         validated = CREATE_TASK_SCHEMA(data)
         assert validated["name"] == "Test Task"
+        assert validated["hide_on_vacation"] is True
 
     def test_create_task_schema_with_all_fields(self):
         """Test create_task schema with all optional fields."""
@@ -98,12 +101,14 @@ class TestServiceSchemas:
             "notification": True,
             "require_approval": False,
             "is_private": False,
+            "hide_on_vacation": False,
             "config_entry_id": "test_entry",
         }
         validated = CREATE_TASK_SCHEMA(data)
         assert validated["name"] == "Test Task"
         assert validated["priority"] == 2
         assert validated["frequency_type"] == "weekly"
+        assert validated["hide_on_vacation"] is False
 
     def test_create_task_schema_invalid_priority(self):
         """Test create_task schema with invalid priority."""
@@ -167,10 +172,18 @@ class TestServiceSchemas:
             "notification": False,
             "require_approval": True,
             "is_private": True,
+            "hide_on_vacation": False,
         }
         validated = UPDATE_TASK_SCHEMA(data)
         assert validated["task_id"] == 1
         assert validated["name"] == "Updated Task"
+        assert validated["hide_on_vacation"] is False
+
+    def test_create_task_form_schema_defaults_hide_on_vacation(self):
+        """The user-friendly form defaults hide_on_vacation to true."""
+        validated = CREATE_TASK_FORM_SCHEMA({"name": "Test Task"})
+
+        assert validated["hide_on_vacation"] is True
 
     def test_set_task_notifications_schema_valid_list(self):
         """Test set_task_notifications schema with a task ID list."""
@@ -192,6 +205,23 @@ class TestServiceSchemas:
         validated = DELETE_TASK_SCHEMA(data)
         assert validated["task_id"] == 1
 
+    def test_services_yaml_exposes_hide_on_vacation(self):
+        """Service metadata exposes Hide On Vacation on every task form."""
+        services_path = (
+            Path(__file__).parent.parent
+            / "custom_components"
+            / "donetick"
+            / "services.yaml"
+        )
+        services = yaml.safe_load(services_path.read_text())
+
+        assert services["create_task"]["fields"]["hide_on_vacation"]["default"] is True
+        assert "hide_on_vacation" in services["update_task"]["fields"]
+        assert (
+            services["create_task_form"]["fields"]["hide_on_vacation"]["default"]
+            is True
+        )
+
 
 class TestAsyncSetupEntry:
     """Tests for async_setup_entry."""
@@ -210,7 +240,11 @@ class TestAsyncSetupEntry:
         hass.config_entries.async_forward_entry_setups = AsyncMock()
         hass.services = MagicMock()
         hass.services.async_register = MagicMock()
-        return hass
+        with patch(
+            "custom_components.donetick._get_api_client",
+            return_value=AsyncMock(),
+        ):
+            yield hass
 
     @pytest.fixture
     def mock_config_entry(self):
@@ -284,6 +318,108 @@ class TestAsyncSetupEntry:
         entry_data = mock_hass.data[DOMAIN][entry.entry_id]
         assert entry_data[CONF_AUTH_TYPE] == AUTH_TYPE_API_KEY
         assert entry_data[CONF_TOKEN] == "test_api_key"
+
+    @pytest.mark.asyncio
+    async def test_setup_failure_cleans_up_vacation_manager(
+        self,
+        mock_hass,
+        mock_config_entry,
+    ):
+        """A platform setup failure must not leave manager listeners behind."""
+        mock_hass.config_entries.async_forward_entry_setups.side_effect = (
+            RuntimeError("platform setup failed")
+        )
+        unsubscribe = MagicMock()
+        mock_hass.bus.async_listen.return_value = unsubscribe
+        manager = MagicMock()
+        manager.async_start = AsyncMock()
+        manager.async_stop = AsyncMock()
+        manager.stop = MagicMock()
+
+        with patch(
+            "custom_components.donetick.VacationModeManager",
+            return_value=manager,
+        ), patch(
+            "custom_components.donetick.async_register_webhook",
+            new_callable=AsyncMock,
+        ), patch(
+            "custom_components.donetick.async_unregister_webhook",
+            new_callable=AsyncMock,
+        ) as unregister_webhook, patch(
+            "custom_components.donetick.generate_webhook_id",
+            return_value="failed_setup_webhook",
+        ), patch(
+            "custom_components.donetick.get_webhook_url",
+            return_value="http://localhost/api/webhook/failed",
+        ):
+            with pytest.raises(RuntimeError, match="platform setup failed"):
+                await async_setup_entry(mock_hass, mock_config_entry)
+
+        mock_config_entry.async_on_unload.assert_called_once_with(manager.stop)
+        manager.async_start.assert_awaited_once()
+        manager.async_stop.assert_awaited_once()
+        unsubscribe.assert_called_once()
+        unregister_webhook.assert_awaited_once_with(
+            mock_hass,
+            "failed_setup_webhook",
+        )
+        assert mock_config_entry.entry_id not in mock_hass.data[DOMAIN]
+
+    @pytest.mark.asyncio
+    async def test_setup_retry_replaces_stale_vacation_manager(
+        self,
+        mock_hass,
+        mock_config_entry,
+    ):
+        """A setup retry stops stale runtime state before creating a manager."""
+        stale_manager = MagicMock()
+        stale_manager.async_stop = AsyncMock()
+        stale_unsubscribe = MagicMock()
+        mock_hass.data = {
+            DOMAIN: {
+                mock_config_entry.entry_id: {
+                    "vacation_manager": stale_manager,
+                    "notification_action_unsub": stale_unsubscribe,
+                    "webhook_id": "stale_webhook",
+                }
+            }
+        }
+        new_manager = MagicMock()
+        new_manager.async_start = AsyncMock()
+        new_manager.async_stop = AsyncMock()
+        new_manager.stop = MagicMock()
+
+        with patch(
+            "custom_components.donetick.VacationModeManager",
+            return_value=new_manager,
+        ), patch(
+            "custom_components.donetick.async_register_webhook",
+            new_callable=AsyncMock,
+        ), patch(
+            "custom_components.donetick.async_unregister_webhook",
+            new_callable=AsyncMock,
+        ) as unregister_webhook, patch(
+            "custom_components.donetick.generate_webhook_id",
+            return_value="new_webhook",
+        ), patch(
+            "custom_components.donetick.get_webhook_url",
+            return_value="http://localhost/api/webhook/new",
+        ):
+            result = await async_setup_entry(mock_hass, mock_config_entry)
+
+        assert result is True
+        stale_manager.async_stop.assert_awaited_once()
+        stale_unsubscribe.assert_called_once()
+        unregister_webhook.assert_awaited_once_with(
+            mock_hass,
+            "stale_webhook",
+        )
+        assert (
+            mock_hass.data[DOMAIN][mock_config_entry.entry_id][
+                "vacation_manager"
+            ]
+            is new_manager
+        )
 
 
 class TestAsyncUnloadEntry:
@@ -538,6 +674,43 @@ class TestCreateTaskService:
                     await async_create_task_service(mock_hass, mock_call)
                 
                 mock_client.async_create_task.assert_called_once()
+                assert (
+                    mock_client.async_create_task.call_args.kwargs["hide_on_vacation"]
+                    is True
+                )
+
+    @pytest.mark.asyncio
+    async def test_create_task_allows_hide_on_vacation_false(
+        self,
+        mock_hass,
+        sample_chore_json,
+    ):
+        """Generic create passes an explicit hide_on_vacation false value."""
+        call = MagicMock()
+        call.data = {"name": "Test Task", "hide_on_vacation": False}
+        created_task = DonetickTask.from_json(sample_chore_json)
+
+        with patch(
+            "custom_components.donetick._get_config_entry",
+            new_callable=AsyncMock,
+        ) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            with patch("custom_components.donetick._get_api_client") as mock_get_client:
+                mock_client = AsyncMock()
+                mock_client.async_create_task = AsyncMock(return_value=created_task)
+                mock_get_client.return_value = mock_client
+                with patch(
+                    "custom_components.donetick._refresh_todo_entities",
+                    new_callable=AsyncMock,
+                ):
+                    await async_create_task_service(mock_hass, call)
+
+        assert (
+            mock_client.async_create_task.call_args.kwargs["hide_on_vacation"]
+            is False
+        )
 
     @pytest.mark.asyncio
     async def test_create_task_parses_assignees(self, mock_hass, sample_chore_json):
@@ -674,6 +847,44 @@ class TestUpdateTaskService:
                     await async_update_task_service(mock_hass, mock_call)
                 
                 mock_client.async_update_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("hide_on_vacation", [True, False])
+    async def test_update_task_passes_hide_on_vacation(
+        self,
+        mock_hass,
+        sample_chore_json,
+        hide_on_vacation,
+    ):
+        """Update service passes explicit hide_on_vacation values."""
+        call = MagicMock()
+        call.data = {
+            "task_id": 1,
+            "hide_on_vacation": hide_on_vacation,
+        }
+        updated_task = DonetickTask.from_json(sample_chore_json)
+
+        with patch(
+            "custom_components.donetick._get_config_entry",
+            new_callable=AsyncMock,
+        ) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            with patch("custom_components.donetick._get_api_client") as mock_get_client:
+                mock_client = AsyncMock()
+                mock_client.async_update_task = AsyncMock(return_value=updated_task)
+                mock_get_client.return_value = mock_client
+                with patch(
+                    "custom_components.donetick._refresh_todo_entities",
+                    new_callable=AsyncMock,
+                ):
+                    await async_update_task_service(mock_hass, call)
+
+        assert (
+            mock_client.async_update_task.call_args.kwargs["hide_on_vacation"]
+            is hide_on_vacation
+        )
 
 
 class TestDeleteTaskService:
@@ -1071,6 +1282,40 @@ class TestCreateTaskFormServiceDueDateHandling:
                 
                 call_kwargs = mock_client.async_create_task.call_args[1]
                 assert call_kwargs["due_date"] is None
+                assert call_kwargs["hide_on_vacation"] is True
+
+    @pytest.mark.asyncio
+    async def test_form_allows_hide_on_vacation_false(self, mock_hass):
+        """The user-friendly form passes an explicit false value."""
+        mock_call = MagicMock()
+        mock_call.data = {
+            "name": "Test Task",
+            "hide_on_vacation": False,
+        }
+
+        with patch(
+            "custom_components.donetick._get_config_entry",
+            new_callable=AsyncMock,
+        ) as mock_get_entry:
+            mock_entry = MagicMock()
+            mock_entry.entry_id = "test_entry_id"
+            mock_get_entry.return_value = mock_entry
+            with patch("custom_components.donetick._get_api_client") as mock_get_client:
+                mock_client = AsyncMock()
+                mock_task = MagicMock()
+                mock_task.id = 123
+                mock_client.async_create_task = AsyncMock(return_value=mock_task)
+                mock_get_client.return_value = mock_client
+                with patch(
+                    "custom_components.donetick._refresh_todo_entities",
+                    new_callable=AsyncMock,
+                ):
+                    await async_create_task_form_service(mock_hass, mock_call)
+
+        assert (
+            mock_client.async_create_task.call_args.kwargs["hide_on_vacation"]
+            is False
+        )
 
     @pytest.mark.asyncio
     async def test_datetime_object_with_noon_preserved(self, mock_hass):

@@ -496,6 +496,10 @@ class TestDonetickApiClientTaskOperations:
             side_effect=[tasks_before, tasks_after]
         )
         authenticated_client._request = AsyncMock(return_value={})
+        authenticated_client.async_get_task = AsyncMock(
+            side_effect=tasks_after
+        )
+        authenticated_client.async_update_due_date = AsyncMock(return_value=True)
 
         result = await authenticated_client.async_set_task_notifications([1, 2, 3], False)
 
@@ -509,6 +513,7 @@ class TestDonetickApiClientTaskOperations:
             request.kwargs["json_data"]["notification"] is False
             for request in authenticated_client._request.call_args_list
         )
+        authenticated_client.async_update_due_date.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_set_task_notifications_skips_matching_tasks(
@@ -556,6 +561,8 @@ class TestDonetickApiClientTaskOperations:
         authenticated_client._request = AsyncMock(
             side_effect=[transient_error, {}]
         )
+        authenticated_client.async_get_task = AsyncMock(return_value=task_after)
+        authenticated_client.async_update_due_date = AsyncMock(return_value=True)
 
         with patch("custom_components.donetick.api.asyncio.sleep", new_callable=AsyncMock) as sleep:
             result = await authenticated_client.async_set_task_notifications(
@@ -581,6 +588,8 @@ class TestDonetickApiClientTaskOperations:
             side_effect=[[task], [task]]
         )
         authenticated_client._request = AsyncMock(return_value={})
+        authenticated_client.async_get_task = AsyncMock(return_value=task)
+        authenticated_client.async_update_due_date = AsyncMock(return_value=True)
 
         with pytest.raises(TaskNotificationUpdateError) as error:
             await authenticated_client.async_set_task_notifications(
@@ -589,6 +598,118 @@ class TestDonetickApiClientTaskOperations:
             )
 
         assert error.value.mismatched_task_ids == [task.id]
+
+    @pytest.mark.asyncio
+    async def test_set_task_notifications_raises_when_due_date_changes(
+        self,
+        authenticated_client,
+        sample_chore_json,
+    ):
+        """Notification reconciliation must fail if Donetick clears a due date."""
+        task_before = DonetickTask.from_json(
+            {**sample_chore_json, "notification": True}
+        )
+        task_after = DonetickTask.from_json(
+            {
+                **sample_chore_json,
+                "notification": False,
+                "nextDueDate": None,
+            }
+        )
+        authenticated_client.async_get_tasks = AsyncMock(
+            side_effect=[[task_before], [task_after]]
+        )
+        authenticated_client._request = AsyncMock(return_value={})
+        authenticated_client.async_get_task = AsyncMock(return_value=task_after)
+        authenticated_client.async_update_due_date = AsyncMock(return_value=True)
+
+        with pytest.raises(TaskNotificationUpdateError) as error:
+            await authenticated_client.async_set_task_notifications(
+                [task_before.id],
+                False,
+            )
+
+        assert error.value.mismatched_due_date_task_ids == [task_before.id]
+        authenticated_client.async_update_due_date.assert_awaited_once_with(
+            task_before.id,
+            task_before.next_due_date.isoformat(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_task_notifications_restores_due_date_when_full_put_clears_it(
+        self,
+        authenticated_client,
+        sample_chore_json,
+    ):
+        """Use the dedicated endpoint if a Donetick full update clears the date."""
+        task_before = DonetickTask.from_json(
+            {**sample_chore_json, "notification": True}
+        )
+        task_after_put = DonetickTask.from_json(
+            {
+                **sample_chore_json,
+                "notification": False,
+                "nextDueDate": None,
+            }
+        )
+        task_after_restore = DonetickTask.from_json(
+            {**sample_chore_json, "notification": False}
+        )
+        authenticated_client.async_get_tasks = AsyncMock(
+            side_effect=[[task_before], [task_after_restore]]
+        )
+        authenticated_client._request = AsyncMock(return_value={})
+        authenticated_client.async_get_task = AsyncMock(
+            return_value=task_after_put
+        )
+        authenticated_client.async_update_due_date = AsyncMock(return_value=True)
+
+        result = await authenticated_client.async_set_task_notifications(
+            [task_before.id],
+            False,
+        )
+
+        assert result == [task_after_restore]
+        authenticated_client.async_update_due_date.assert_awaited_once_with(
+            task_before.id,
+            task_before.next_due_date.isoformat(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_task_notifications_skips_due_restore_without_due_date(
+        self,
+        authenticated_client,
+        sample_chore_json,
+    ):
+        """Tasks without a due date should not call the due-date endpoint."""
+        task_before = DonetickTask.from_json(
+            {
+                **sample_chore_json,
+                "notification": True,
+                "nextDueDate": None,
+            }
+        )
+        task_after = DonetickTask.from_json(
+            {
+                **sample_chore_json,
+                "notification": False,
+                "nextDueDate": None,
+            }
+        )
+        authenticated_client.async_get_tasks = AsyncMock(
+            side_effect=[[task_before], [task_after]]
+        )
+        authenticated_client._request = AsyncMock(return_value={})
+        authenticated_client.async_get_task = AsyncMock(return_value=task_after)
+        authenticated_client.async_update_due_date = AsyncMock(return_value=True)
+
+        result = await authenticated_client.async_set_task_notifications(
+            [task_before.id],
+            False,
+        )
+
+        assert result == [task_after]
+        authenticated_client.async_update_due_date.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_set_task_notifications_retries_empty_task_list(
@@ -619,6 +740,67 @@ class TestDonetickApiClientTaskOperations:
             await client.async_set_task_notifications([1], False)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("hide_on_vacation", [True, False])
+    async def test_create_task_includes_hide_on_vacation(
+        self,
+        authenticated_client,
+        sample_chore_json,
+        hide_on_vacation,
+    ):
+        """Full create payloads should include hideOnVacation."""
+        authenticated_client._request = AsyncMock(
+            return_value={
+                **sample_chore_json,
+                "hideOnVacation": hide_on_vacation,
+            }
+        )
+
+        await authenticated_client.async_create_task(
+            name="Vacation task",
+            hide_on_vacation=hide_on_vacation,
+        )
+
+        payload = authenticated_client._request.call_args.kwargs["json_data"]
+        assert payload["hideOnVacation"] is hide_on_vacation
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("hide_on_vacation", [True, False])
+    async def test_api_key_create_includes_hide_on_vacation(
+        self,
+        mock_aiohttp_session,
+        sample_chore_json,
+        hide_on_vacation,
+    ):
+        """eAPI ChoreLiteReq create payloads persist hideOnVacation."""
+        client = DonetickApiClient(
+            base_url="https://donetick.example.com",
+            session=mock_aiohttp_session,
+            auth_type=AUTH_TYPE_API_KEY,
+            api_token="test_api_key",
+        )
+        client._request = AsyncMock(
+            return_value={
+                **sample_chore_json,
+                "hideOnVacation": hide_on_vacation,
+            }
+        )
+
+        result = await client.async_create_task(
+            name="Vacation task",
+            hide_on_vacation=hide_on_vacation,
+        )
+
+        client._request.assert_awaited_once_with(
+            "POST",
+            "/eapi/v1/chore",
+            json_data={
+                "name": "Vacation task",
+                "hideOnVacation": hide_on_vacation,
+            },
+        )
+        assert result.hide_on_vacation is hide_on_vacation
+
+    @pytest.mark.asyncio
     async def test_update_task_merges_with_current_task_for_jwt_put(self, authenticated_client, sample_chore_json):
         """JWT updates should send a full task payload, not only changed fields."""
         existing_task = DonetickTask.from_json(sample_chore_json)
@@ -636,10 +818,74 @@ class TestDonetickApiClientTaskOperations:
         assert payload["name"] == existing_task.name
         assert payload["frequencyType"] == existing_task.frequency_type
         assert payload["frequencyMetadata"] == existing_task.frequency_metadata
+        assert payload["nextDueDate"] == existing_task.next_due_date.isoformat()
+        assert payload["dueDate"] == existing_task.next_due_date.isoformat()
         assert payload["assignStrategy"] == existing_task.assign_strategy
         assert payload["assignees"] == [{"userId": 42}, {"userId": 43}]
         assert payload["notification"] is False
         assert payload["notificationMetadata"] == existing_task.notification_metadata
+        assert payload["hideOnVacation"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("hide_on_vacation", [True, False])
+    async def test_update_task_includes_hide_on_vacation(
+        self,
+        authenticated_client,
+        sample_chore_json,
+        hide_on_vacation,
+    ):
+        """Full update payloads should preserve or override hideOnVacation."""
+        existing_task = DonetickTask.from_json(sample_chore_json)
+        authenticated_client.async_get_tasks = AsyncMock(return_value=[existing_task])
+        authenticated_client._request = AsyncMock(
+            return_value={
+                **sample_chore_json,
+                "hideOnVacation": hide_on_vacation,
+            }
+        )
+
+        result = await authenticated_client.async_update_task(
+            task_id=existing_task.id,
+            hide_on_vacation=hide_on_vacation,
+        )
+
+        payload = authenticated_client._request.call_args.kwargs["json_data"]
+        assert payload["hideOnVacation"] is hide_on_vacation
+        assert result.hide_on_vacation is hide_on_vacation
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("hide_on_vacation", [True, False])
+    async def test_api_key_hide_only_update(
+        self,
+        mock_aiohttp_session,
+        sample_chore_json,
+        hide_on_vacation,
+    ):
+        """eAPI accepts a hideOnVacation-only ChoreLiteReq update."""
+        client = DonetickApiClient(
+            base_url="https://donetick.example.com",
+            session=mock_aiohttp_session,
+            auth_type=AUTH_TYPE_API_KEY,
+            api_token="test_api_key",
+        )
+        client._request = AsyncMock(
+            return_value={
+                **sample_chore_json,
+                "hideOnVacation": hide_on_vacation,
+            }
+        )
+
+        result = await client.async_update_task(
+            task_id=sample_chore_json["id"],
+            hide_on_vacation=hide_on_vacation,
+        )
+
+        client._request.assert_awaited_once_with(
+            "PUT",
+            f"/eapi/v1/chore/{sample_chore_json['id']}",
+            json_data={"hideOnVacation": hide_on_vacation},
+        )
+        assert result.hide_on_vacation is hide_on_vacation
 
     def test_task_update_payload_fills_server_required_fields(
         self,
@@ -667,6 +913,86 @@ class TestDonetickApiClientTaskOperations:
         assert payload["description"] == ""
         assert payload["labelsV2"] == []
         assert payload["assignStrategy"] == "random"
+        assert payload["hideOnVacation"] is True
+
+
+class TestDonetickApiClientVacationMode:
+    """Tests for circle vacation mode synchronization."""
+
+    @pytest.fixture
+    def authenticated_client(self, mock_aiohttp_session):
+        """Create an authenticated JWT client."""
+        client = DonetickApiClient(
+            base_url="https://donetick.example.com",
+            session=mock_aiohttp_session,
+            auth_type=AUTH_TYPE_JWT,
+            username="testuser",
+            **{"pass" + "word": "testpass"},
+        )
+        client._jwt_token = "valid_token"
+        client._jwt_expiry = datetime.now(timezone.utc) + timedelta(hours=1)
+        return client
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("active", [True, False])
+    async def test_set_vacation_mode_verifies_returned_circle_state(
+        self,
+        authenticated_client,
+        active,
+    ):
+        """Verify vacationModeActive when the endpoint returns circle JSON."""
+        authenticated_client._request = AsyncMock(
+            return_value={"res": {"vacationModeActive": active}}
+        )
+
+        result = await authenticated_client.async_set_vacation_mode(active)
+
+        assert result is active
+        authenticated_client._request.assert_awaited_once_with(
+            "PUT",
+            "/api/v1/circles/vacation-mode",
+            json_data={"active": active},
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_vacation_mode_rejects_mismatched_readback(
+        self,
+        authenticated_client,
+    ):
+        """Reject a circle response that does not match the requested state."""
+        authenticated_client._request = AsyncMock(
+            return_value={"vacationModeActive": False}
+        )
+
+        with pytest.raises(RuntimeError):
+            await authenticated_client.async_set_vacation_mode(True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("active", [True, False])
+    async def test_set_vacation_mode_uses_eapi_for_api_key(
+        self,
+        mock_aiohttp_session,
+        active,
+    ):
+        """API-key authentication uses the eAPI vacation mode endpoint."""
+        client = DonetickApiClient(
+            base_url="https://donetick.example.com",
+            session=mock_aiohttp_session,
+            auth_type=AUTH_TYPE_API_KEY,
+            api_token="test_api_key",
+        )
+        client._request = AsyncMock(
+            return_value={"res": {"vacationModeActive": active}}
+        )
+
+        result = await client.async_set_vacation_mode(active)
+
+        assert result is active
+        client._request.assert_awaited_once_with(
+            "PUT",
+            "/eapi/v1/circle/vacation-mode",
+            json_data={"active": active},
+        )
 
 
 class TestDonetickApiClientThingOperations:
